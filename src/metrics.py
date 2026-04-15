@@ -1,19 +1,28 @@
 """
-Метрики качества калибровки PD моделей.
+Метрики качества PD-моделей: калибровка, дискриминация, стабильность.
 
-Метрики:
-    - Brier Score              — общая точность вероятностных прогнозов
+Калибровка:
+    - Brier Score              — среднеквадратичная ошибка вероятностных прогнозов
     - Log-Loss                 — логарифмическая функция потерь
     - ECE                      — Expected Calibration Error
-    - Hosmer-Lemeshow test     — статистический тест калибровки (стандарт в банках)
-    - Calibration Slope        — наклон регрессии реальных PD на предсказанные
-    - Calibration Intercept    — сдвиг той же регрессии
-    - reliability_data         — данные для построения диаграммы надёжности
+    - Hosmer-Lemeshow test     — статистический тест калибровки (стандарт Basel III)
+    - Calibration Slope/Intercept — наклон и сдвиг регрессии реальных PD на предсказанные
+
+Дискриминация:
+    - AUC-ROC                  — площадь под ROC-кривой
+    - Gini coefficient         — 2 × AUC − 1, стандарт в кредитном скоринге
+    - KS statistic             — максимальное расхождение кумулятивных распределений
+
+Стабильность:
+    - PSI                      — Population Stability Index, мониторинг дрейфа
+
+Надёжность метрик:
+    - bootstrap_ci             — доверительный интервал любой метрики через Bootstrap
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import brier_score_loss, log_loss
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score, roc_curve
 from sklearn.calibration import calibration_curve
 from sklearn.linear_model import LogisticRegression
 from scipy import stats
@@ -176,7 +185,7 @@ def summary_metrics(
     name: str = "",
 ) -> dict:
     """
-    Полный набор метрик для одного метода калибровки.
+    Полный набор метрик калибровки для одного метода.
 
     Returns:
         dict с метриками: Brier, Log-Loss, ECE, HL p-value, Slope, Intercept
@@ -185,12 +194,177 @@ def summary_metrics(
     si   = calibration_slope_intercept(y_true, y_prob)
 
     return {
-        "method":      name,
-        "brier_score": round(brier_score(y_true, y_prob), 5),
-        "log_loss":    round(log_loss_score(y_true, y_prob), 5),
-        "ece":         round(expected_calibration_error(y_true, y_prob), 5),
-        "hl_chi2":     hl["chi2"],
-        "hl_p_value":  hl["p_value"],
-        "cal_slope":   si["slope"],
+        "method":        name,
+        "brier_score":   round(brier_score(y_true, y_prob), 5),
+        "log_loss":      round(log_loss_score(y_true, y_prob), 5),
+        "ece":           round(expected_calibration_error(y_true, y_prob), 5),
+        "hl_chi2":       hl["chi2"],
+        "hl_p_value":    hl["p_value"],
+        "cal_slope":     si["slope"],
         "cal_intercept": si["intercept"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Метрики дискриминации
+# ---------------------------------------------------------------------------
+
+def discrimination_metrics(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    name: str = "",
+) -> dict:
+    """
+    Метрики дискриминирующей способности модели.
+
+    AUC-ROC:
+        Вероятность того, что модель выше оценит дефолтного заёмщика,
+        чем недефолтного. Диапазон [0.5, 1.0], идеал: 1.0.
+
+    Gini coefficient:
+        Gini = 2 × AUC − 1. Стандарт кредитного скоринга.
+        Диапазон [0, 1]: > 0.4 — приемлемо, > 0.6 — хорошо.
+
+    KS statistic (Kolmogorov-Smirnov):
+        Максимальное расстояние между кумулятивными распределениями
+        дефолтных и недефолтных клиентов.
+        Диапазон [0, 1]: > 0.3 — приемлемо, > 0.5 — хорошо.
+
+    Важно: дискриминация и калибровка — независимые свойства.
+    Хорошо откалиброванная модель с Gini=0.3 хуже, чем
+    плохо откалиброванная с Gini=0.7 (калибровку можно поправить).
+    """
+    auc = roc_auc_score(y_true, y_prob)
+    gini = 2 * auc - 1
+
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    ks = float(np.max(np.abs(tpr - fpr)))
+
+    return {
+        "method": name,
+        "auc_roc": round(auc, 4),
+        "gini":    round(gini, 4),
+        "ks_stat": round(ks, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Population Stability Index (PSI)
+# ---------------------------------------------------------------------------
+
+def psi(
+    expected: np.ndarray,
+    actual: np.ndarray,
+    n_bins: int = 10,
+) -> dict:
+    """
+    Population Stability Index — индекс стабильности популяции.
+
+    Измеряет сдвиг распределения скоров между двумя выборками:
+        expected — эталонное распределение (обычно обучающая выборка)
+        actual   — проверяемое распределение (калибровочная или тестовая)
+
+    Формула: PSI = Σ (actual_% − expected_%) × ln(actual_% / expected_%)
+
+    Интерпретация:
+        PSI < 0.10  — распределение стабильно, изменений нет
+        0.10–0.25   — умеренный сдвиг, требует мониторинга
+        > 0.25      — значительный сдвиг, модель могла устареть
+
+    Returns:
+        dict с ключами: psi_value, verdict, bin_details (DataFrame)
+    """
+    # Строим бины по квантилям expected
+    breakpoints = np.percentile(expected, np.linspace(0, 100, n_bins + 1))
+    breakpoints = np.unique(breakpoints)
+    breakpoints[0]  = -np.inf
+    breakpoints[-1] =  np.inf
+
+    eps = 1e-7
+    rows = []
+    psi_value = 0.0
+
+    for i in range(len(breakpoints) - 1):
+        exp_pct = np.mean((expected >= breakpoints[i]) & (expected < breakpoints[i + 1]))
+        act_pct = np.mean((actual   >= breakpoints[i]) & (actual   < breakpoints[i + 1]))
+
+        exp_pct = max(exp_pct, eps)
+        act_pct = max(act_pct, eps)
+
+        bucket_psi = (act_pct - exp_pct) * np.log(act_pct / exp_pct)
+        psi_value += bucket_psi
+        rows.append({
+            "bin":      i + 1,
+            "exp_%":    round(exp_pct * 100, 2),
+            "act_%":    round(act_pct * 100, 2),
+            "psi_bin":  round(bucket_psi, 5),
+        })
+
+    if psi_value < 0.10:
+        verdict = "Стабильно (PSI < 0.10)"
+    elif psi_value < 0.25:
+        verdict = "Умеренный сдвиг (0.10 <= PSI < 0.25) -- мониторинг"
+    else:
+        verdict = "Значительный сдвиг (PSI >= 0.25) -- переобучка модели"
+
+    return {
+        "psi_value":  round(psi_value, 5),
+        "verdict":    verdict,
+        "bin_details": pd.DataFrame(rows),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap доверительные интервалы
+# ---------------------------------------------------------------------------
+
+def bootstrap_ci(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    metric_fn,
+    n_iter: int = 1000,
+    ci: float = 0.95,
+    random_state: int = 42,
+) -> dict:
+    """
+    Bootstrap доверительный интервал для произвольной метрики.
+
+    Зачем нужно:
+        При малом числе дефолтов (~115 в тесте) точечные оценки метрик
+        имеют высокую дисперсию. Bootstrap показывает реальную ширину CI:
+        если интервалы двух методов перекрываются — их различие незначимо.
+
+    Параметры:
+        metric_fn  — функция вида f(y_true, y_prob) → float
+        n_iter     — число bootstrap-итераций (1000 достаточно для CI)
+        ci         — уровень доверия (0.95 → 95% CI)
+
+    Returns:
+        dict с ключами: point_estimate, ci_lower, ci_upper, std
+    """
+    rng = np.random.default_rng(random_state)
+    n = len(y_true)
+    bootstrap_scores = []
+
+    for _ in range(n_iter):
+        idx = rng.integers(0, n, size=n)
+        y_b = y_true[idx]
+        p_b = y_prob[idx]
+        # Пропускаем итерации без обоих классов (редко, но возможно)
+        if len(np.unique(y_b)) < 2:
+            continue
+        try:
+            bootstrap_scores.append(metric_fn(y_b, p_b))
+        except Exception:
+            continue
+
+    scores = np.array(bootstrap_scores)
+    alpha = (1 - ci) / 2
+
+    return {
+        "point_estimate": round(metric_fn(y_true, y_prob), 5),
+        "ci_lower":       round(float(np.percentile(scores, alpha * 100)), 5),
+        "ci_upper":       round(float(np.percentile(scores, (1 - alpha) * 100)), 5),
+        "std":            round(float(scores.std()), 5),
+        "n_iter":         len(scores),
     }
