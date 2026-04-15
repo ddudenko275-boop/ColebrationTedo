@@ -2,17 +2,19 @@
 Генерация реалистичных синтетических данных кредитного портфеля банка.
 
 Особенности:
-    - Доля дефолтов 2-3% (реалистично для розничного кредитования)
+    - Доля дефолтов 3-5% (реалистично для розничного кредитования)
     - Временна́я метка выдачи кредита (2019-2024) для out-of-time валидации
     - Банковские признаки: кредитный рейтинг, LTV, DTI, срок и др.
     - Намеренная нелинейность в зависимости скор → PD (сплайн имеет преимущество)
+    - n_samples=30_000 по умолчанию: при 3-5% дефолтов даёт ~600+ событий
+      в калибровочной выборке, что необходимо для устойчивой калибровки
 """
 
 import numpy as np
 import pandas as pd
 
 
-def generate_credit_data(n_samples: int = 10000, random_state: int = 42) -> pd.DataFrame:
+def generate_credit_data(n_samples: int = 30000, random_state: int = 42) -> pd.DataFrame:
     """
     Генерирует синтетический кредитный портфель банка.
 
@@ -59,7 +61,7 @@ def generate_credit_data(n_samples: int = 10000, random_state: int = 42) -> pd.D
     )
 
     log_odds = (
-        -4.5
+        -6.2
         + cs_effect
         + 2.0 * ltv
         + 1.5 * dti
@@ -121,7 +123,7 @@ def get_oot_split(df: pd.DataFrame, target_col: str = "default"):
 
 
 if __name__ == "__main__":
-    df = generate_credit_data(n_samples=10000)
+    df = generate_credit_data(n_samples=30000)
     print(f"Датасет: {df.shape[0]:,} строк, {df.shape[1]} столбцов")
     print(f"Доля дефолтов: {df['default'].mean():.2%}")
     print(f"\nДефолты по годам:")
