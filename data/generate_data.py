@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 
 
-FEATURE_EXCLUDE_COLUMNS = {"default", "origination_year", "true_pd"}
+# Helper columns are kept for diagnostics, but must not be used as model inputs.
+# In particular, risk_segment is the hidden data-generating segment; giving it to
+# the model makes the experiment unrealistically easy and masks calibration risk.
+FEATURE_EXCLUDE_COLUMNS = {"default", "origination_year", "risk_segment", "true_pd"}
 
 
 def generate_credit_data(
