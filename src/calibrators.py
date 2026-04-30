@@ -23,17 +23,21 @@ def _clip_prob(values: np.ndarray) -> np.ndarray:
 
 
 class LogitCalibrator:
-    """Platt-style logistic calibration on raw probability scores."""
+    """Platt-style logistic calibration on logit-transformed probability scores."""
 
     def __init__(self):
         self._model = LogisticRegression(solver="lbfgs", max_iter=1000, C=1e12)
 
+    def _transform(self, scores: np.ndarray) -> np.ndarray:
+        s = _clip_prob(scores)
+        return np.log(s / (1.0 - s)).reshape(-1, 1)
+
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "LogitCalibrator":
-        self._model.fit(_as_1d(scores).reshape(-1, 1), np.asarray(y))
+        self._model.fit(self._transform(scores), np.asarray(y))
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
-        return _clip_prob(self._model.predict_proba(_as_1d(scores).reshape(-1, 1))[:, 1])
+        return _clip_prob(self._model.predict_proba(self._transform(scores))[:, 1])
 
 
 class IsotonicCalibrator:
@@ -72,7 +76,7 @@ class BetaCalibrator:
 
         result = minimize(
             neg_log_likelihood,
-            x0=np.array([1.0, 1.0, 0.0]),
+            x0=np.array([1.0, -1.0, 0.0]),
             method="L-BFGS-B",
         )
         self.a_, self.b_, self.c_ = [float(v) for v in result.x]
