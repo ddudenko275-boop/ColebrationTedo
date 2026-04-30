@@ -162,9 +162,9 @@ def get_all_calibrators() -> dict:
     """Return the default set of PD calibrators used in the project."""
 
     return {
-        "Logit calibration": LogitCalibrator(),
-        "Isotonic regression": IsotonicCalibrator(),
-        "Beta calibration": BetaCalibrator(),
-        "Monotone spline": MonotoneSplineCalibrator(),
-        "French spline": FrenchSplineCalibrator(),
+        "Логит-калибровка": LogitCalibrator(),
+        "Изотоническая регрессия": IsotonicCalibrator(),
+        "Бета-калибровка": BetaCalibrator(),
+        "Монотонный сплайн": MonotoneSplineCalibrator(),
+        "Французский сплайн": FrenchSplineCalibrator(),
     }
