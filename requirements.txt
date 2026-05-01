@@ -8,3 +8,4 @@ betacal>=0.1
 pygam>=0.9
 jupyter>=1.0
 ipykernel>=6.0
+pytest>=8.0
