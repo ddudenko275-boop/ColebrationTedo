@@ -15,6 +15,7 @@ from src.portfolio import (
     rating_master_scale,
     rating_scale_capital,
     summarize_rating_scale,
+    validate_common_rating_structure,
 )
 
 
@@ -186,10 +187,30 @@ def test_compare_methods_by_rating_master_scale_adds_method_dimension():
         rating_order=tuple(ratings),
     )
     summary = summarize_rating_scale(scale, method_col="method")
+    structure_check = validate_common_rating_structure(scale)
 
     assert set(scale["method"]) == {"low", "high"}
     assert summary.loc["low", "target_weighted_pd"] == pytest.approx(0.10)
     assert summary.loc["high", "target_weighted_pd"] == pytest.approx(0.10)
+    assert structure_check["is_common"].all()
+
+
+def test_validate_common_rating_structure_rejects_method_specific_counts():
+    scale = pd.DataFrame(
+        {
+            "method": ["m1", "m1", "m2", "m2"],
+            "rating": ["A1", "A2", "A1", "A2"],
+            "n_assets": [10, 20, 11, 19],
+            "total_ead": [10.0, 20.0, 11.0, 19.0],
+            "defaults": [0, 1, 0, 1],
+            "observed_default_rate": [0.0, 0.05, 0.0, 0.05],
+            "portfolio_count_share": [1 / 3, 2 / 3, 11 / 30, 19 / 30],
+            "portfolio_ead_share": [1 / 3, 2 / 3, 11 / 30, 19 / 30],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Rating structure differs"):
+        validate_common_rating_structure(scale)
 
 
 def test_rating_scale_capital_uses_rating_level_ead_buckets():
