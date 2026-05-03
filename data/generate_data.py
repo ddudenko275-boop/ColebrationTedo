@@ -9,7 +9,15 @@ import pandas as pd
 # Helper columns are kept for diagnostics, but must not be used as model inputs.
 # In particular, risk_segment is the hidden data-generating segment; giving it to
 # the model makes the experiment unrealistically easy and masks calibration risk.
-FEATURE_EXCLUDE_COLUMNS = {"default", "origination_year", "risk_segment", "true_pd"}
+FEATURE_EXCLUDE_COLUMNS = {"default", "origination_year", "risk_segment", "rating", "true_pd"}
+
+
+RATING_LABELS = {
+    0: "A",
+    1: "B",
+    2: "C",
+    3: "D",
+}
 
 
 def generate_credit_data(
@@ -144,6 +152,7 @@ def generate_credit_data(
             "num_delinquencies": num_delinquencies.astype(float),
             "loan_purpose": loan_purpose,
             "risk_segment": risk_segment,
+            "rating": pd.Series(risk_segment).map(RATING_LABELS).to_numpy(),
             "origination_year": origination_year,
             "true_pd": true_pd,
             "default": default,
