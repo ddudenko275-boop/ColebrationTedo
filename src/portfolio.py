@@ -414,6 +414,51 @@ def compare_methods_by_rating_master_scale(
     return pd.concat(rows, ignore_index=True)
 
 
+def validate_common_rating_structure(
+    scale: pd.DataFrame,
+    method_col: str = "method",
+    rating_col: str = "rating",
+    invariant_cols: tuple[str, ...] = (
+        "n_assets",
+        "total_ead",
+        "defaults",
+        "observed_default_rate",
+        "portfolio_count_share",
+        "portfolio_ead_share",
+    ),
+    tolerance: float = 1e-10,
+) -> pd.DataFrame:
+    """Validate that all methods use the same portfolio structure by rating.
+
+    A fair calibration comparison must keep the portfolio composition fixed:
+    the same borrowers, ratings, defaults and EAD buckets. Calibration methods
+    should only change PD columns such as ``pd_rating`` and capital outputs.
+    """
+
+    _validate_columns(scale, (method_col, rating_col, *invariant_cols))
+    rows = []
+    for col in invariant_cols:
+        pivot = scale.pivot(index=rating_col, columns=method_col, values=col)
+        spread = pivot.max(axis=1) - pivot.min(axis=1)
+        ok_by_rating = spread.fillna(0.0) <= tolerance
+        rows.append(
+            {
+                "field": col,
+                "is_common": bool(ok_by_rating.all()),
+                "max_abs_difference": float(spread.abs().max()),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if not bool(out["is_common"].all()):
+        failed = out.loc[~out["is_common"], "field"].tolist()
+        raise ValueError(
+            "Rating structure differs across methods for fields: "
+            f"{failed}. Fix the rating assignment before comparing calibration methods."
+        )
+    return out
+
+
 def summarize_rating_scale(
     scale: pd.DataFrame,
     method_col: str | None = None,
