@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import minimize
-from scipy.special import expit
+from scipy.special import expit, logit
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
@@ -22,18 +23,45 @@ def _clip_prob(values: np.ndarray) -> np.ndarray:
     return np.clip(_as_1d(values), EPS, 1.0 - EPS)
 
 
-class LogitCalibrator:
-    """Platt-style logistic calibration on logit-transformed probability scores."""
+def _safe_logit(values: np.ndarray) -> np.ndarray:
+    return logit(_clip_prob(values))
 
-    def __init__(self):
-        self._model = LogisticRegression(solver="lbfgs", max_iter=1000, C=1e12)
+
+def _interp_with_boundaries(interp, x: np.ndarray, x_min: float, x_max: float, y_min: float, y_max: float) -> np.ndarray:
+    """
+    PCHIP аккуратно работает внутри диапазона.
+    За пределами calibration-диапазона фиксируем крайние значения.
+    """
+    x = _as_1d(x)
+    y = interp(x)
+
+    y = np.where(x < x_min, y_min, y)
+    y = np.where(x > x_max, y_max, y)
+
+    return y
+
+
+class LogitCalibrator:
+    """
+    Platt-style logistic calibration.
+
+    Модель строит преобразование:
+    raw RF-score -> logit(raw RF-score) -> calibrated PD
+    """
+
+    def __init__(self, C: float = 1e6):
+        self._model = LogisticRegression(
+            solver="lbfgs",
+            max_iter=1000,
+            C=C
+        )
 
     def _transform(self, scores: np.ndarray) -> np.ndarray:
-        s = _clip_prob(scores)
-        return np.log(s / (1.0 - s)).reshape(-1, 1)
+        return _safe_logit(scores).reshape(-1, 1)
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "LogitCalibrator":
-        self._model.fit(self._transform(scores), np.asarray(y))
+        y = np.asarray(y, dtype=int)
+        self._model.fit(self._transform(scores), y)
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
@@ -41,13 +69,20 @@ class LogitCalibrator:
 
 
 class IsotonicCalibrator:
-    """Non-parametric monotone calibration with piecewise-constant output."""
+    """
+    Непараметрическая монотонная калибровка.
+
+    Хорошо ловит нелинейности, но может давать ступенчатую функцию.
+    """
 
     def __init__(self):
-        self._model = IsotonicRegression(increasing=True, out_of_bounds="clip")
+        self._model = IsotonicRegression(
+            increasing=True,
+            out_of_bounds="clip"
+        )
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "IsotonicCalibrator":
-        self._model.fit(_as_1d(scores), np.asarray(y))
+        self._model.fit(_as_1d(scores), np.asarray(y, dtype=float))
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
@@ -55,9 +90,15 @@ class IsotonicCalibrator:
 
 
 class BetaCalibrator:
-    """Beta calibration following the Kull-Silva Filho-Flach probability map."""
+    """
+    Beta calibration.
 
-    def __init__(self):
+    Более гибкая параметрическая калибровка:
+    PD = sigmoid(a * log(s) + b * log(1 - s) + c)
+    """
+
+    def __init__(self, l2: float = 1e-4):
+        self.l2 = l2
         self.a_: float | None = None
         self.b_: float | None = None
         self.c_: float | None = None
@@ -66,104 +107,300 @@ class BetaCalibrator:
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "BetaCalibrator":
         s = _clip_prob(scores)
         y = np.asarray(y, dtype=float)
+
         log_s = np.log(s)
         log_1_minus_s = np.log(1.0 - s)
 
         def neg_log_likelihood(params: np.ndarray) -> float:
             a, b, c = params
-            p = _clip_prob(expit(a * log_s + b * log_1_minus_s + c))
-            return -float(np.sum(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
+
+            z = a * log_s + b * log_1_minus_s + c
+            p = _clip_prob(expit(z))
+
+            nll = -np.sum(
+                y * np.log(p) + (1.0 - y) * np.log(1.0 - p)
+            )
+
+            penalty = self.l2 * (a ** 2 + b ** 2 + c ** 2)
+
+            return float(nll + penalty)
 
         result = minimize(
             neg_log_likelihood,
             x0=np.array([1.0, -1.0, 0.0]),
             method="L-BFGS-B",
+            bounds=[(-20, 20), (-20, 20), (-20, 20)]
         )
+
+        if not result.success:
+            raise RuntimeError(f"Beta calibration did not converge: {result.message}")
+
         self.a_, self.b_, self.c_ = [float(v) for v in result.x]
-        self.success_ = bool(result.success)
+        self.success_ = True
+
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
         if self.a_ is None or self.b_ is None or self.c_ is None:
             raise RuntimeError("BetaCalibrator must be fitted before predict().")
+
         s = _clip_prob(scores)
-        return _clip_prob(expit(self.a_ * np.log(s) + self.b_ * np.log(1.0 - s) + self.c_))
+
+        z = self.a_ * np.log(s) + self.b_ * np.log(1.0 - s) + self.c_
+
+        return _clip_prob(expit(z))
 
 
-def _bin_stats(scores: np.ndarray, y: np.ndarray, n_bins: int = 30) -> pd.DataFrame:
-    tmp = pd.DataFrame({"score": _as_1d(scores), "y": np.asarray(y, dtype=float)})
-    q = min(n_bins, tmp["score"].nunique())
-    tmp["bin"] = pd.qcut(tmp["score"], q=q, duplicates="drop")
-    return (
-        tmp.groupby("bin", observed=True)
-        .agg(score_mean=("score", "mean"), default_rate=("y", "mean"), n=("y", "size"))
+def _bin_stats(
+    scores: np.ndarray,
+    y: np.ndarray,
+    n_bins: int = 30,
+    alpha: float = 20.0
+) -> pd.DataFrame:
+    """
+    Строим статистику по квантильным бинам.
+
+    alpha — сглаживание default rate.
+    Оно защищает от слишком резких значений в маленьких бинах.
+    """
+
+    scores = _as_1d(scores)
+    y = np.asarray(y, dtype=float)
+
+    tmp = pd.DataFrame({
+        "score": scores,
+        "y": y
+    })
+
+    n_unique = tmp["score"].nunique()
+
+    if n_unique < 2:
+        raise ValueError("At least two unique score values are required.")
+
+    q = min(n_bins, n_unique)
+
+    tmp["bin"] = pd.qcut(
+        tmp["score"],
+        q=q,
+        duplicates="drop"
+    )
+
+    base_rate = float(tmp["y"].mean())
+
+    stat = (
+        tmp
+        .groupby("bin", observed=True)
+        .agg(
+            score_mean=("score", "mean"),
+            defaults=("y", "sum"),
+            n=("y", "size")
+        )
         .reset_index(drop=True)
         .sort_values("score_mean")
     )
 
+    stat["default_rate_raw"] = stat["defaults"] / stat["n"]
+
+    stat["default_rate_smooth"] = (
+        stat["defaults"] + alpha * base_rate
+    ) / (
+        stat["n"] + alpha
+    )
+
+    return stat
+
 
 class MonotoneSplineCalibrator:
-    """Smoothed monotone calibration curve built from binned default rates.
+    """
+    Монотонный сплайн.
 
-    The method first smooths binned default rates with isotonic regression and
-    then interpolates the monotone curve with PCHIP. It is deliberately simple:
-    the goal is a governance-friendly smooth PD curve, not maximum flexibility.
+    Логика:
+    RF-score -> бины -> сглаженная default rate -> isotonic -> PCHIP.
     """
 
-    def __init__(self, n_bins: int = 30):
+    def __init__(self, n_bins: int = 30, alpha: float = 20.0):
         self.n_bins = n_bins
+        self.alpha = alpha
+
         self._interp: PchipInterpolator | None = None
         self.bin_stats_: pd.DataFrame | None = None
 
+        self.x_min_: float | None = None
+        self.x_max_: float | None = None
+        self.y_min_: float | None = None
+        self.y_max_: float | None = None
+
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "MonotoneSplineCalibrator":
-        stat = _bin_stats(scores, y, n_bins=self.n_bins)
+        stat = _bin_stats(
+            scores=scores,
+            y=y,
+            n_bins=self.n_bins,
+            alpha=self.alpha
+        )
+
         x = stat["score_mean"].to_numpy()
-        r = stat["default_rate"].to_numpy()
+        r = stat["default_rate_smooth"].to_numpy()
         w = stat["n"].to_numpy()
 
-        iso = IsotonicRegression(increasing=True, out_of_bounds="clip")
+        iso = IsotonicRegression(
+            increasing=True,
+            out_of_bounds="clip"
+        )
+
         r_iso = iso.fit_transform(x, r, sample_weight=w)
+
         x_u, idx = np.unique(x, return_index=True)
         y_u = r_iso[idx]
 
         if len(x_u) < 2:
-            raise ValueError("At least two unique score bins are required for spline calibration.")
+            raise ValueError("At least two unique score bins are required.")
 
-        self._interp = PchipInterpolator(x_u, y_u, extrapolate=True)
+        self._interp = PchipInterpolator(
+            x_u,
+            y_u,
+            extrapolate=False
+        )
+
+        self.x_min_ = float(x_u[0])
+        self.x_max_ = float(x_u[-1])
+        self.y_min_ = float(y_u[0])
+        self.y_max_ = float(y_u[-1])
+
         self.bin_stats_ = stat.assign(default_rate_iso=r_iso)
+
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
         if self._interp is None:
             raise RuntimeError("MonotoneSplineCalibrator must be fitted before predict().")
-        return _clip_prob(self._interp(_as_1d(scores)))
+
+        y = _interp_with_boundaries(
+            interp=self._interp,
+            x=_as_1d(scores),
+            x_min=self.x_min_,
+            x_max=self.x_max_,
+            y_min=self.y_min_,
+            y_max=self.y_max_
+        )
+
+        return _clip_prob(y)
 
 
 class FrenchSplineCalibrator:
-    """Two-stage logit plus monotone spline PD calibration.
+    """
+    Двухэтапная калибровка:
 
-    This is an experimental, ICAS-style inspired calibration recipe: a stable
-    parametric logit step is followed by a smooth monotone correction curve.
+    1. LogitCalibrator задает стабильный общий уровень PD.
+    2. Сплайн корректирует остаточную ошибку в logit-пространстве.
+
+    В отличие от простой версии, здесь сплайн не просто повторяет обычный
+    MonotoneSplineCalibrator, а работает как поправка к логит-калибровке.
     """
 
-    def __init__(self, n_bins: int = 30):
+    def __init__(
+        self,
+        n_bins: int = 30,
+        alpha: float = 20.0,
+        shrinkage: float = 0.6
+    ):
+        self.n_bins = n_bins
+        self.alpha = alpha
+        self.shrinkage = shrinkage
+
         self.logit_stage = LogitCalibrator()
-        self.spline_stage = MonotoneSplineCalibrator(n_bins=n_bins)
+
+        self._interp: PchipInterpolator | None = None
+        self.bin_stats_: pd.DataFrame | None = None
+
+        self.x_min_: float | None = None
+        self.x_max_: float | None = None
+        self.y_min_: float | None = None
+        self.y_max_: float | None = None
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "FrenchSplineCalibrator":
-        y = np.asarray(y)
+        y = np.asarray(y, dtype=float)
+
+        # Шаг 1: базовая логит-калибровка.
         self.logit_stage.fit(scores, y)
-        stage1 = self.logit_stage.predict(scores)
-        self.spline_stage.fit(stage1, y)
+        p_logit = self.logit_stage.predict(scores)
+
+        # Шаг 2: строим бины уже по логит-калиброванной PD.
+        stat = _bin_stats(
+            scores=p_logit,
+            y=y,
+            n_bins=self.n_bins,
+            alpha=self.alpha
+        )
+
+        p_bin = _clip_prob(stat["score_mean"].to_numpy())
+        r = _clip_prob(stat["default_rate_smooth"].to_numpy())
+        w = stat["n"].to_numpy()
+
+        # Сначала делаем монотонную эмпирическую default rate.
+        iso = IsotonicRegression(
+            increasing=True,
+            out_of_bounds="clip"
+        )
+
+        r_iso = _clip_prob(iso.fit_transform(p_bin, r, sample_weight=w))
+
+        # Важное отличие:
+        # обычный сплайн строит p -> empirical default rate.
+        # французский сплайн строит поправку в logit-пространстве.
+        x = _safe_logit(p_bin)
+        z_logit = _safe_logit(p_bin)
+        z_empirical = _safe_logit(r_iso)
+
+        # shrinkage не дает сплайну полностью "сломать" стабильную логит-калибровку.
+        y_target = (1.0 - self.shrinkage) * z_logit + self.shrinkage * z_empirical
+
+        x_u, idx = np.unique(x, return_index=True)
+        y_u = y_target[idx]
+
+        if len(x_u) < 2:
+            raise ValueError("At least two unique bins are required.")
+
+        self._interp = PchipInterpolator(
+            x_u,
+            y_u,
+            extrapolate=False
+        )
+
+        self.x_min_ = float(x_u[0])
+        self.x_max_ = float(x_u[-1])
+        self.y_min_ = float(y_u[0])
+        self.y_max_ = float(y_u[-1])
+
+        self.bin_stats_ = stat.assign(
+            default_rate_iso=r_iso,
+            logit_target=y_target
+        )
+
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
-        stage1 = self.logit_stage.predict(scores)
-        return self.spline_stage.predict(stage1)
+        if self._interp is None:
+            raise RuntimeError("FrenchSplineCalibrator must be fitted before predict().")
+
+        p_logit = self.logit_stage.predict(scores)
+        z = _safe_logit(p_logit)
+
+        z_adj = _interp_with_boundaries(
+            interp=self._interp,
+            x=z,
+            x_min=self.x_min_,
+            x_max=self.x_max_,
+            y_min=self.y_min_,
+            y_max=self.y_max_
+        )
+
+        return _clip_prob(expit(z_adj))
 
 
 def get_all_calibrators() -> dict:
-    """Return the default set of PD calibrators used in the project."""
+    """
+    Набор калибраторов для сравнения.
+    """
 
     return {
         "Логит-калибровка": LogitCalibrator(),
