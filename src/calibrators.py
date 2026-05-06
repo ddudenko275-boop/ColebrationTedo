@@ -397,6 +397,41 @@ class FrenchSplineCalibrator:
         return _clip_prob(expit(z_adj))
 
 
+def spline_smoothing_analysis(
+    scores_calib: np.ndarray,
+    y_calib: np.ndarray,
+    scores_test: np.ndarray,
+    y_test: np.ndarray,
+    lam_grid: np.ndarray | None = None,
+    n_bins: int = 30,
+) -> pd.DataFrame:
+    """Compare monotone spline smoothing values for legacy notebook runs."""
+
+    if lam_grid is None:
+        lam_grid = np.logspace(-2, 2, 9)
+
+    y_calib = np.asarray(y_calib, dtype=float)
+    y_test = np.asarray(y_test, dtype=float)
+
+    rows = []
+    for lam in lam_grid:
+        cal = MonotoneSplineCalibrator(n_bins=n_bins, alpha=float(lam))
+        cal.fit(scores_calib, y_calib)
+
+        pred_calib = cal.predict(scores_calib)
+        pred_test = cal.predict(scores_test)
+
+        rows.append(
+            {
+                "lam": float(lam),
+                "brier_calib": float(np.mean((y_calib - pred_calib) ** 2)),
+                "brier_test": float(np.mean((y_test - pred_test) ** 2)),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def get_all_calibrators() -> dict:
     """
     Набор калибраторов для сравнения.
