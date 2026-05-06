@@ -135,12 +135,15 @@ def get_calibration_curve(
 def summary_metrics(y_true: np.ndarray, y_prob: np.ndarray, name: str = "") -> dict:
     hl = hosmer_lemeshow_test(y_true, y_prob)
     si = calibration_slope_intercept(y_true, y_prob)
+    ece_uniform = round(expected_calibration_error(y_true, y_prob, strategy="uniform"), 5)
+    ece_quantile = round(expected_calibration_error(y_true, y_prob, strategy="quantile"), 5)
     return {
         "method": name,
         "brier_score": round(brier_score(y_true, y_prob), 5),
         "log_loss": round(log_loss_score(y_true, y_prob), 5),
-        "ece_uniform": round(expected_calibration_error(y_true, y_prob, strategy="uniform"), 5),
-        "ece_quantile": round(expected_calibration_error(y_true, y_prob, strategy="quantile"), 5),
+        "ece": ece_quantile,
+        "ece_uniform": ece_uniform,
+        "ece_quantile": ece_quantile,
         "hl_chi2": hl["chi2"],
         "hl_p_value": hl["p_value"],
         "cal_slope": si["slope"],
@@ -200,12 +203,22 @@ def psi(expected: np.ndarray, actual: np.ndarray, n_bins: int = 10) -> dict:
                 "bin": i + 1,
                 "expected_pct": exp_pct,
                 "actual_pct": act_pct,
+                "exp_%": exp_pct * 100.0,
+                "act_%": act_pct * 100.0,
                 "psi_bin": bucket,
             }
         )
 
+    if value < 0.1:
+        verdict = "stable"
+    elif value < 0.25:
+        verdict = "moderate shift"
+    else:
+        verdict = "significant shift"
+
     return {
         "psi_value": round(float(value), 5),
+        "verdict": verdict,
         "bin_details": pd.DataFrame(rows),
     }
 
