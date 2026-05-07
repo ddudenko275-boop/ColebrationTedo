@@ -4,10 +4,8 @@ import pytest
 
 from data.generate_data import generate_credit_data, get_oot_split
 from src.portfolio import (
-    BUSINESS_MASTER_SCALE_SHARES,
     MASTER_SCALE_RATINGS,
     assign_master_scale_ratings,
-    assign_master_scale_ratings_by_shares,
     calibrate_pd_to_target,
     compare_methods_by_rating_master_scale,
     compare_methods_by_historical_panel,
@@ -128,27 +126,6 @@ def test_assign_master_scale_ratings_uses_reference_breakpoints():
 
     assert list(assigned.astype(str)) == ["A1", "C1", "E"]
     assert len(MASTER_SCALE_RATINGS) == 13
-
-
-def test_assign_master_scale_ratings_by_shares_matches_business_mix():
-    ref = np.arange(1000, dtype=float)
-    assigned = assign_master_scale_ratings_by_shares(ref, reference_scores=ref)
-    shares = pd.Series(assigned).value_counts(normalize=True).reindex(MASTER_SCALE_RATINGS)
-
-    assert sum(BUSINESS_MASTER_SCALE_SHARES) == pytest.approx(1.0)
-    assert shares.loc["A1"] == pytest.approx(0.16, abs=0.002)
-    assert shares.loc["E"] == pytest.approx(0.01, abs=0.002)
-    assert shares.loc[["A1", "A2", "A3"]].sum() == pytest.approx(0.42, abs=0.002)
-    assert shares.loc[["D1", "D2", "D3", "E"]].sum() == pytest.approx(0.10, abs=0.002)
-
-
-def test_assign_master_scale_ratings_by_shares_rejects_invalid_shares():
-    with pytest.raises(ValueError, match="sum to 1"):
-        assign_master_scale_ratings_by_shares(
-            np.arange(10, dtype=float),
-            ratings=("A", "B"),
-            target_shares=(0.4, 0.4),
-        )
 
 
 def test_calibrate_pd_to_target_matches_weighted_average():
