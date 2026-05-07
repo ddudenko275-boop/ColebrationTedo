@@ -27,21 +27,6 @@ MASTER_SCALE_RATINGS = (
     "D3",
     "E",
 )
-BUSINESS_MASTER_SCALE_SHARES = (
-    0.16,
-    0.14,
-    0.12,
-    0.11,
-    0.10,
-    0.09,
-    0.075,
-    0.06,
-    0.045,
-    0.04,
-    0.03,
-    0.02,
-    0.01,
-)
 DEFAULT_ASSET_EAD = 1_000_000.0
 EPS = 1e-6
 
@@ -294,45 +279,6 @@ def assign_master_scale_ratings(
         raise ValueError(
             "reference_scores do not contain enough unique values for the rating scale"
         )
-    edges[0], edges[-1] = -np.inf, np.inf
-    return pd.cut(values, bins=edges, labels=ratings, include_lowest=True, ordered=True)
-
-
-def assign_master_scale_ratings_by_shares(
-    scores: np.ndarray | pd.Series,
-    reference_scores: np.ndarray | pd.Series | None = None,
-    ratings: tuple[str, ...] = MASTER_SCALE_RATINGS,
-    target_shares: tuple[float, ...] = BUSINESS_MASTER_SCALE_SHARES,
-) -> pd.Categorical:
-    """Assign ordered master-scale ratings using business target shares.
-
-    Lower scores receive the first, best rating. Unlike equal-frequency
-    quantile buckets, target shares can make high-risk ratings intentionally
-    sparse, which is closer to a performing bank portfolio.
-    """
-
-    if len(ratings) < 2:
-        raise ValueError("ratings must contain at least two levels")
-    if len(target_shares) != len(ratings):
-        raise ValueError("target_shares must have the same length as ratings")
-
-    shares = np.asarray(target_shares, dtype=float)
-    if np.any(shares <= 0.0):
-        raise ValueError("target_shares must be positive")
-    if not np.isclose(shares.sum(), 1.0):
-        raise ValueError("target_shares must sum to 1")
-
-    ref = _as_1d(scores if reference_scores is None else reference_scores, "reference_scores")
-    values = _as_1d(scores, "scores")
-
-    quantiles = np.concatenate([[0.0], np.cumsum(shares)])
-    quantiles[-1] = 1.0
-    edges = np.unique(np.quantile(ref, quantiles))
-    if len(edges) - 1 != len(ratings):
-        raise ValueError(
-            "reference_scores do not contain enough unique values for the rating scale"
-        )
-
     edges[0], edges[-1] = -np.inf, np.inf
     return pd.cut(values, bins=edges, labels=ratings, include_lowest=True, ordered=True)
 
