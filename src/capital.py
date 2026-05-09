@@ -1,8 +1,9 @@
-"""Basel-style capital calculations for calibrated PD estimates.
+"""Capital calculations for calibrated PD estimates.
 
 The functions in this module implement a compact IRB-style approximation for
-non-defaulted corporate exposures. They are intended for analytical comparison
-of calibrated PD methods, not for production regulatory reporting.
+non-defaulted corporate exposures and the 845-P style block recommended for
+the project. They are intended for analytical comparison of calibrated PD
+methods, not for production regulatory reporting.
 """
 
 from __future__ import annotations
@@ -181,6 +182,90 @@ def calculate_irb_capital(
             "required_capital": assumptions.capital_ratio * rwa,
         }
     )
+
+
+def calculate_845p_capital(
+    pd_values: np.ndarray,
+    defaults: np.ndarray | pd.Series | None = None,
+    assumptions: IRBAssumptions | None = None,
+    ead_values: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Return row-level 845-P style capital using the mentor's formula block.
+
+    Output keeps the mentor's column names:
+    ``FRAT_FINAL_PD``, ``EAD``, ``DEFAULT_DURING_NEXT_YEAR``, ``Reserves``,
+    ``R``, ``RWA_capital`` and ``Capital_true``.
+    """
+
+    if assumptions is None:
+        assumptions = IRBAssumptions()
+
+    pd_values = clip_pd(_as_float_array(pd_values, "pd_values"), pd_floor=assumptions.pd_floor)
+    ead_values = _resolve_ead_values(pd_values, assumptions, ead_values)
+
+    if defaults is None:
+        default_values = np.zeros(len(pd_values), dtype=float)
+    else:
+        default_values = _as_float_array(defaults, "defaults")
+        if len(default_values) != len(pd_values):
+            raise ValueError("defaults must have the same length as pd_values")
+
+    r = corporate_asset_correlation(pd_values)
+    rwa_capital = ead_values * capital_requirement_k(
+        pd_values,
+        lgd=assumptions.lgd,
+        maturity_years=assumptions.maturity_years,
+    )
+    reserves = pd_values * assumptions.lgd * ead_values
+    default_loss = assumptions.lgd * ead_values
+    capital_true = np.where(default_values == 1.0, default_loss, reserves + rwa_capital)
+
+    return pd.DataFrame(
+        {
+            "FRAT_FINAL_PD": pd_values,
+            "EAD": ead_values,
+            "DEFAULT_DURING_NEXT_YEAR": default_values,
+            "Reserves": reserves,
+            "R": r,
+            "RWA_capital": rwa_capital,
+            "Capital_true": capital_true,
+        }
+    )
+
+
+def summarize_845p_capital(
+    pd_values: np.ndarray,
+    defaults: np.ndarray | pd.Series | None = None,
+    assumptions: IRBAssumptions | None = None,
+    ead_values: np.ndarray | None = None,
+) -> dict:
+    """Summarise portfolio-level 845-P reserves, UL capital and true capital."""
+
+    details = calculate_845p_capital(
+        pd_values,
+        defaults=defaults,
+        assumptions=assumptions,
+        ead_values=ead_values,
+    )
+    total_ead = details["EAD"].sum()
+    total_reserves = details["Reserves"].sum()
+    total_rwa_capital = details["RWA_capital"].sum()
+    total_capital_true = details["Capital_true"].sum()
+    return {
+        "avg_pd": details["FRAT_FINAL_PD"].mean(),
+        "total_ead": total_ead,
+        "total_reserves": total_reserves,
+        "total_expected_loss": total_reserves,
+        "total_rwa_capital": total_rwa_capital,
+        "total_unexpected_loss_capital": total_rwa_capital,
+        "total_capital_true": total_capital_true,
+        "total_rwa": total_rwa_capital,
+        "total_required_capital": total_capital_true,
+        "reserves_rate_to_ead": total_reserves / total_ead,
+        "rwa_capital_rate_to_ead": total_rwa_capital / total_ead,
+        "capital_true_rate_to_ead": total_capital_true / total_ead,
+        "defaults": details["DEFAULT_DURING_NEXT_YEAR"].sum(),
+    }
 
 
 def summarize_irb_capital(
@@ -461,3 +546,89 @@ def compare_irb_capital_by_method(
     )
     out["capital_ratio_if_keep_baseline_capital"] = base_capital / out["total_rwa"]
     return out
+
+
+def compare_845p_capital_by_method(
+    predictions: Mapping[str, np.ndarray],
+    defaults: np.ndarray | pd.Series | None = None,
+    assumptions: IRBAssumptions | None = None,
+    baseline_method: str | None = None,
+    ead_values: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Compare mentor-format 845-P capital across PD calibration methods."""
+
+    rows = []
+    for method, pd_values in predictions.items():
+        row = summarize_845p_capital(
+            pd_values,
+            defaults=defaults,
+            assumptions=assumptions,
+            ead_values=ead_values,
+        )
+        row["method"] = method
+        rows.append(row)
+
+    out = pd.DataFrame(rows).set_index("method")
+    if baseline_method is None:
+        baseline_method = out.index[0]
+
+    base_capital = out.loc[baseline_method, "total_capital_true"]
+    base_rwa_capital = out.loc[baseline_method, "total_rwa_capital"]
+
+    out["capital_true_saving_vs_baseline"] = base_capital - out["total_capital_true"]
+    out["capital_true_saving_vs_baseline_pct"] = (
+        out["capital_true_saving_vs_baseline"] / base_capital
+    )
+    out["rwa_capital_saving_vs_baseline"] = base_rwa_capital - out["total_rwa_capital"]
+    out["rwa_capital_saving_vs_baseline_pct"] = (
+        out["rwa_capital_saving_vs_baseline"] / base_rwa_capital
+    )
+    # Backward-compatible aliases for notebook tables that compare "RWA" and
+    # capital generically. In this 845-P block, RWA means the mentor's
+    # RWA_capital/UL component, not Basel RWA divided by the capital ratio.
+    out["rwa_saving_vs_baseline"] = out["rwa_capital_saving_vs_baseline"]
+    out["rwa_saving_vs_baseline_pct"] = out["rwa_capital_saving_vs_baseline_pct"]
+    out["capital_saving_vs_baseline"] = out["capital_true_saving_vs_baseline"]
+    out["capital_saving_vs_baseline_pct"] = out["capital_true_saving_vs_baseline_pct"]
+    return out
+
+
+def capital_volatility_summary(
+    capital_by_method: pd.DataFrame,
+    metric_cols: tuple[str, ...] = (
+        "total_reserves",
+        "total_rwa_capital",
+        "total_capital_true",
+    ),
+) -> pd.DataFrame:
+    """Summarise how volatile capital metrics are across calibration methods."""
+
+    missing = [col for col in metric_cols if col not in capital_by_method.columns]
+    if missing:
+        raise KeyError(f"Missing capital metrics: {missing}")
+
+    rows = []
+    for metric in metric_cols:
+        values = capital_by_method[metric].astype(float)
+        mean_value = float(values.mean())
+        min_value = float(values.min())
+        max_value = float(values.max())
+        rows.append(
+            {
+                "metric": metric,
+                "min": min_value,
+                "max": max_value,
+                "mean": mean_value,
+                "std": float(values.std(ddof=0)),
+                "range": max_value - min_value,
+                "range_pct_of_mean": (
+                    (max_value - min_value) / mean_value if mean_value != 0.0 else np.nan
+                ),
+                "coefficient_of_variation": (
+                    float(values.std(ddof=0)) / mean_value if mean_value != 0.0 else np.nan
+                ),
+                "min_method": values.idxmin(),
+                "max_method": values.idxmax(),
+            }
+        )
+    return pd.DataFrame(rows).set_index("metric")

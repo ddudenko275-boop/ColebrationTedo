@@ -178,6 +178,33 @@ def get_oot_split(df: pd.DataFrame, target_col: str = "default"):
     )
 
 
+def get_same_year_calibration_test_split(
+    df: pd.DataFrame,
+    target_col: str = "default",
+    train_years: tuple[int, ...] = (2019, 2020, 2021, 2022, 2023),
+    calibration_test_year: int = 2024,
+):
+    """Use one year as both calibration and test, per mentor recommendation.
+
+    This intentionally returns the same feature/target slice for calibration
+    and test. It is useful for the project scenario where RWA is assessed on
+    the full 2024 portfolio after fitting the score model on prior years.
+    """
+
+    feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUDE_COLUMNS | {target_col}]
+    train_mask = df["origination_year"].isin(train_years)
+    year_mask = df["origination_year"] == calibration_test_year
+
+    return (
+        df.loc[train_mask, feature_cols],
+        df.loc[year_mask, feature_cols],
+        df.loc[year_mask, feature_cols],
+        df.loc[train_mask, target_col],
+        df.loc[year_mask, target_col],
+        df.loc[year_mask, target_col],
+    )
+
+
 def portfolio_summary(df: pd.DataFrame) -> dict:
     """Return compact descriptive statistics for a generated portfolio."""
 

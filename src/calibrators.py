@@ -433,14 +433,12 @@ def spline_smoothing_analysis(
 
 
 def get_all_calibrators() -> dict:
-    """
-    Набор калибраторов для сравнения.
-    """
+    """Return the default set of calibrators used in the notebook."""
 
     return {
-        "Логит-калибровка": LogitCalibrator(),
-        "Изотоническая регрессия": IsotonicCalibrator(),
-        "Бета-калибровка": BetaCalibrator(),
-        "Монотонный сплайн": MonotoneSplineCalibrator(),
-        "Французский сплайн": FrenchSplineCalibrator(),
+        "Logit calibration": LogitCalibrator(),
+        "Isotonic regression": IsotonicCalibrator(),
+        "Beta calibration": BetaCalibrator(),
+        "Monotone spline": MonotoneSplineCalibrator(),
+        "French spline": FrenchSplineCalibrator(),
     }

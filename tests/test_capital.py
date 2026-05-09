@@ -5,10 +5,14 @@ import pytest
 from src.capital import (
     CapitalStressScenario,
     IRBAssumptions,
+    capital_volatility_summary,
+    calculate_845p_capital,
     calculate_irb_capital,
     capital_sensitivity_table,
     capital_stress_scenarios,
+    compare_845p_capital_by_method,
     rwa_waterfall,
+    summarize_845p_capital,
     summarize_irb_capital,
 )
 
@@ -20,6 +24,61 @@ def sample_pd() -> np.ndarray:
 def test_calculate_irb_capital_rejects_ead_length_mismatch():
     with pytest.raises(ValueError, match="ead_values must have the same length"):
         calculate_irb_capital(sample_pd(), ead_values=np.array([1_000_000.0]))
+
+
+def test_calculate_845p_capital_matches_mentor_columns_and_default_rule():
+    pd_values = np.array([0.011241, 0.014630])
+    defaults = np.array([0.0, 1.0])
+    out = calculate_845p_capital(
+        pd_values,
+        defaults=defaults,
+        assumptions=IRBAssumptions(lgd=0.40, ead=1_000_000.0),
+    )
+
+    assert list(out.columns) == [
+        "FRAT_FINAL_PD",
+        "EAD",
+        "DEFAULT_DURING_NEXT_YEAR",
+        "Reserves",
+        "R",
+        "RWA_capital",
+        "Capital_true",
+    ]
+    assert out.loc[0, "Capital_true"] == pytest.approx(
+        out.loc[0, "Reserves"] + out.loc[0, "RWA_capital"]
+    )
+    assert out.loc[1, "Capital_true"] == pytest.approx(400_000.0)
+
+
+def test_compare_845p_capital_by_method_uses_same_defaults_for_all_methods():
+    predictions = {
+        "base": np.array([0.01, 0.02, 0.03]),
+        "up": np.array([0.02, 0.03, 0.04]),
+    }
+    defaults = np.array([0.0, 1.0, 0.0])
+
+    out = compare_845p_capital_by_method(predictions, defaults=defaults)
+
+    assert out.loc["base", "defaults"] == pytest.approx(1.0)
+    assert out.loc["up", "total_rwa_capital"] > out.loc["base", "total_rwa_capital"]
+    assert summarize_845p_capital(predictions["base"], defaults=defaults)["defaults"] == 1.0
+
+
+def test_capital_volatility_summary_reports_range_across_methods():
+    capital = pd.DataFrame(
+        {
+            "total_reserves": [10.0, 12.0, 20.0],
+            "total_rwa_capital": [100.0, 80.0, 120.0],
+            "total_capital_true": [110.0, 92.0, 140.0],
+        },
+        index=["a", "b", "c"],
+    )
+
+    out = capital_volatility_summary(capital)
+
+    assert out.loc["total_capital_true", "range"] == pytest.approx(48.0)
+    assert out.loc["total_capital_true", "min_method"] == "b"
+    assert out.loc["total_capital_true", "max_method"] == "c"
 
 
 def test_capital_stress_scenarios_default_shape_and_base_delta():

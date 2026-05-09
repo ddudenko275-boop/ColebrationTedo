@@ -2,18 +2,26 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.generate_data import generate_credit_data, get_oot_split
+from data.generate_data import generate_credit_data, get_oot_split, get_same_year_calibration_test_split
 from src.portfolio import (
     MASTER_SCALE_RATINGS,
+    apply_delta_logit,
+    assign_pd_master_scale_ratings,
     assign_master_scale_ratings,
     calibrate_pd_to_target,
     compare_methods_by_rating_master_scale,
     compare_methods_by_historical_panel,
+    delta_logit_scenarios,
     historical_portfolio_panel,
+    master_scale_pd_bound_capital,
+    method_master_scale_distribution,
     method_portfolio_summary,
+    master_scale_table,
     portfolio_average_pd,
+    rating_migration_matrix,
     rating_master_scale,
     rating_scale_capital,
+    score_distribution_table,
     summarize_rating_scale,
     validate_common_rating_structure,
 )
@@ -40,6 +48,16 @@ def test_generated_rating_is_kept_out_of_model_features():
     assert "rating" not in x_train.columns
     assert "rating" not in x_calib.columns
     assert "rating" not in x_test.columns
+
+
+def test_same_year_calibration_test_split_uses_2024_for_both_calib_and_test():
+    df = generate_credit_data(n_samples=500, random_state=7)
+    x_train, x_calib, x_test, y_train, y_calib, y_test = get_same_year_calibration_test_split(df)
+
+    assert set(df.loc[x_train.index, "origination_year"].unique()) <= {2019, 2020, 2021, 2022, 2023}
+    assert set(df.loc[x_calib.index, "origination_year"].unique()) == {2024}
+    assert x_calib.index.equals(x_test.index)
+    assert y_calib.index.equals(y_test.index)
 
 
 def test_historical_portfolio_panel_preserves_period_rating_structure():
@@ -128,6 +146,15 @@ def test_assign_master_scale_ratings_uses_reference_breakpoints():
     assert len(MASTER_SCALE_RATINGS) == 13
 
 
+def test_assign_pd_master_scale_ratings_uses_fixed_pd_boundaries():
+    assigned = assign_pd_master_scale_ratings(np.array([0.0005, 0.0007, 0.20, 0.60]))
+
+    assert list(assigned.astype(str)) == ["A1", "A2", "D3", "E"]
+    scale = master_scale_table()
+    assert list(scale.columns) == ["rating", "pd_lower", "pd_upper", "pd_avg"]
+    assert scale.loc[scale["rating"] == "E", "pd_upper"].iloc[0] == pytest.approx(1.0)
+
+
 def test_calibrate_pd_to_target_matches_weighted_average():
     pd_values = np.array([0.01, 0.03, 0.10, 0.30])
     weights = np.array([100.0, 200.0, 300.0, 400.0])
@@ -136,6 +163,16 @@ def test_calibrate_pd_to_target_matches_weighted_average():
 
     assert np.average(calibrated, weights=weights) == pytest.approx(0.12)
     assert np.all(np.diff(calibrated) > 0)
+
+
+def test_delta_logit_scenarios_shift_pd_without_changing_order():
+    pd_values = np.array([0.01, 0.03, 0.10])
+    shifted = apply_delta_logit(pd_values, delta=0.5)
+    scenarios = delta_logit_scenarios(pd_values, deltas=[-0.5, 0.0, 0.5])
+
+    assert np.all(np.diff(shifted) > 0)
+    assert shifted.mean() > pd_values.mean()
+    assert scenarios.loc["delta +0.500", "avg_pd"] > scenarios.loc["delta +0.000", "avg_pd"]
 
 
 def test_rating_master_scale_calibrates_rating_pd_to_target():
@@ -228,3 +265,69 @@ def test_rating_scale_capital_uses_rating_level_ead_buckets():
     assert out.loc["m1", "total_ead"] == pytest.approx(3_000_000.0)
     assert out.loc["m1", "total_expected_loss"] > 0.0
     assert out.loc["m1", "total_rwa"] > out.loc["m1", "total_expected_loss"]
+    assert out.loc["m1", "total_capital_true"] == pytest.approx(
+        out.loc["m1", "total_expected_loss"] + out.loc["m1", "total_rwa"]
+    )
+
+
+def test_method_master_scale_distribution_uses_pd_boundaries_per_method():
+    df = pd.DataFrame({"default": [0, 0, 1, 0], "ead": [1.0, 2.0, 3.0, 4.0]})
+    predictions = {
+        "low": np.array([0.0005, 0.0007, 0.0020, 0.20]),
+        "high": np.array([0.0007, 0.0020, 0.20, 0.30]),
+    }
+
+    out = method_master_scale_distribution(df, predictions, ead_col="ead")
+
+    assert set(out["method"]) == {"low", "high"}
+    assert out.loc[(out["method"] == "low") & (out["rating"] == "A1"), "n_assets"].iloc[0] == 1
+    assert out.loc[(out["method"] == "high") & (out["rating"] == "E"), "n_assets"].iloc[0] == 1
+
+
+def test_rating_migration_matrix_counts_moves_from_baseline():
+    predictions = {
+        "base": np.array([0.0005, 0.0007, 0.0020]),
+        "shifted": np.array([0.0007, 0.0020, 0.20]),
+    }
+
+    out = rating_migration_matrix(predictions, baseline_method="base")
+    shifted = out[out["method"] == "shifted"]
+
+    assert shifted["n_assets"].sum() == 3
+    assert shifted.loc[
+        (shifted["baseline_rating"] == "A1") & (shifted["method_rating"] == "A2"),
+        "n_assets",
+    ].iloc[0] == 1
+
+
+def test_score_distribution_table_counts_defaults_by_bin():
+    out = score_distribution_table(
+        np.array([0.1, 0.2, 0.8, 0.9]),
+        defaults=np.array([0, 1, 0, 1]),
+        bins=np.array([0.0, 0.5, 1.0]),
+    )
+
+    assert out["n_assets"].sum() == 4
+    assert out.loc[0, "defaults"] == pytest.approx(1.0)
+    assert out.loc[1, "observed_default_rate"] == pytest.approx(0.5)
+
+
+def test_master_scale_pd_bound_capital_builds_lower_avg_upper_sensitivity():
+    distribution = pd.DataFrame(
+        {
+            "method": ["m1", "m1"],
+            "rating": ["A1", "E"],
+            "total_ead": [1_000_000.0, 2_000_000.0],
+            "pd_lower": [0.0000, 0.26],
+            "pd_avg_master": [0.0005, 0.40],
+            "pd_upper": [0.0006, 1.00],
+        }
+    )
+
+    out = master_scale_pd_bound_capital(distribution)
+
+    assert ("m1", "pd_lower") in out.index
+    assert ("m1", "pd_avg_master") in out.index
+    assert out.loc[("m1", "pd_upper"), "total_capital_true"] > out.loc[
+        ("m1", "pd_avg_master"), "total_capital_true"
+    ]

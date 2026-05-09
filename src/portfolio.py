@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
 from scipy.special import expit
 
-from src.capital import IRBAssumptions, calculate_irb_capital
+from src.capital import IRBAssumptions, calculate_845p_capital
 
 DEFAULT_RATING_ORDER = ("A", "B", "C", "D")
 MASTER_SCALE_RATINGS = (
@@ -27,6 +27,21 @@ MASTER_SCALE_RATINGS = (
     "D3",
     "E",
 )
+MASTER_SCALE_PD_BOUNDS = {
+    "A1": (0.0000, 0.0006, 0.0005),
+    "A2": (0.0006, 0.0008, 0.0007),
+    "A3": (0.0008, 0.0010, 0.0009),
+    "B1": (0.0010, 0.0014, 0.0012),
+    "B2": (0.0014, 0.0030, 0.0022),
+    "B3": (0.0030, 0.0065, 0.0047),
+    "C1": (0.0065, 0.0105, 0.0085),
+    "C2": (0.0105, 0.0182, 0.0155),
+    "C3": (0.0182, 0.0291, 0.0161),
+    "D1": (0.0291, 0.0576, 0.0405),
+    "D2": (0.0576, 0.1407, 0.1032),
+    "D3": (0.1407, 0.2600, 0.1998),
+    "E": (0.2600, 1.0000, 0.4000),
+}
 DEFAULT_ASSET_EAD = 1_000_000.0
 EPS = 1e-6
 
@@ -65,6 +80,17 @@ def _resolve_rating_ead(
 
 def _clip_prob(values: np.ndarray | pd.Series) -> np.ndarray:
     return np.clip(_as_1d(values, "pd_values"), EPS, 1.0 - EPS)
+
+
+def apply_delta_logit(
+    pd_values: np.ndarray | pd.Series,
+    delta: float,
+) -> np.ndarray:
+    """Shift PD values by a fixed delta on the logit scale."""
+
+    base_pd = _clip_prob(pd_values)
+    logits = np.log(base_pd / (1.0 - base_pd))
+    return expit(logits + float(delta))
 
 
 def _validate_columns(
@@ -283,6 +309,45 @@ def assign_master_scale_ratings(
     return pd.cut(values, bins=edges, labels=ratings, include_lowest=True, ordered=True)
 
 
+def master_scale_table(
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Return the fixed PD master scale used for final rating assignment."""
+
+    rows = []
+    for rating in rating_order:
+        lower, upper, avg = MASTER_SCALE_PD_BOUNDS[rating]
+        rows.append(
+            {
+                "rating": rating,
+                "pd_lower": lower,
+                "pd_upper": upper,
+                "pd_avg": avg,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def assign_pd_master_scale_ratings(
+    pd_values: np.ndarray | pd.Series,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.Categorical:
+    """Assign ratings by fixed master-scale PD boundaries."""
+
+    values = _clip_prob(pd_values)
+    scale = master_scale_table(rating_order)
+    bins = scale["pd_lower"].tolist() + [scale["pd_upper"].iloc[-1]]
+    bins[0], bins[-1] = -np.inf, np.inf
+    return pd.cut(
+        values,
+        bins=bins,
+        labels=tuple(scale["rating"]),
+        include_lowest=True,
+        right=True,
+        ordered=True,
+    )
+
+
 def calibrate_pd_to_target(
     pd_values: np.ndarray | pd.Series,
     weights: np.ndarray | pd.Series,
@@ -301,12 +366,41 @@ def calibrate_pd_to_target(
     if not EPS < target_pd < 1.0 - EPS:
         raise ValueError("target_pd must be between 0 and 1")
 
-    logits = np.log(base_pd / (1.0 - base_pd))
-
     def objective(shift: float) -> float:
-        return float(np.average(expit(logits + shift), weights=weights_arr) - target_pd)
+        return float(np.average(apply_delta_logit(base_pd, shift), weights=weights_arr) - target_pd)
 
-    return expit(logits + brentq(objective, -50.0, 50.0))
+    return apply_delta_logit(base_pd, brentq(objective, -50.0, 50.0))
+
+
+def delta_logit_scenarios(
+    pd_values: np.ndarray | pd.Series,
+    deltas: Iterable[float],
+    weights: np.ndarray | pd.Series | None = None,
+    scenario_prefix: str = "delta",
+) -> pd.DataFrame:
+    """Return average PD after several logit-scale shifts."""
+
+    base_pd = _clip_prob(pd_values)
+    weights_arr = np.ones(len(base_pd), dtype=float) if weights is None else _as_1d(weights, "weights")
+    if len(weights_arr) != len(base_pd):
+        raise ValueError("weights must have the same length as pd_values")
+    if np.any(weights_arr < 0.0) or weights_arr.sum() <= 0.0:
+        raise ValueError("weights must be non-negative and have positive sum")
+
+    rows = []
+    for delta in deltas:
+        shifted = apply_delta_logit(base_pd, float(delta))
+        rows.append(
+            {
+                "scenario": f"{scenario_prefix} {float(delta):+.3f}",
+                "delta_logit": float(delta),
+                "avg_pd": float(shifted.mean()),
+                "ead_weighted_pd": float(np.average(shifted, weights=weights_arr)),
+                "pd_min": float(shifted.min()),
+                "pd_max": float(shifted.max()),
+            }
+        )
+    return pd.DataFrame(rows).set_index("scenario")
 
 
 def rating_master_scale(
@@ -414,6 +508,182 @@ def compare_methods_by_rating_master_scale(
     return pd.concat(rows, ignore_index=True)
 
 
+def method_master_scale_distribution(
+    df: pd.DataFrame,
+    predictions: Mapping[str, np.ndarray | pd.Series],
+    default_col: str = "default",
+    ead_col: str | None = None,
+    default_asset_ead: float = DEFAULT_ASSET_EAD,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Assign each method's calibrated PD to the fixed master scale and summarise."""
+
+    if not predictions:
+        raise ValueError("predictions must contain at least one method")
+    _validate_columns(df, (default_col,))
+    ead = _resolve_rating_ead(df, ead_col, default_asset_ead)
+    defaults = _as_1d(df[default_col], default_col)
+    scale_bounds = master_scale_table(rating_order).set_index("rating")
+
+    rows = []
+    for method, pd_values in predictions.items():
+        pd_arr = _clip_prob(pd_values)
+        if len(pd_arr) != len(df):
+            raise ValueError(f"Prediction length for '{method}' must match df length")
+        ratings = assign_pd_master_scale_ratings(pd_arr, rating_order=rating_order)
+        work = pd.DataFrame(
+            {
+                "rating": ratings,
+                "_pd": pd_arr,
+                "_ead": ead,
+                "_default": defaults,
+                "_weighted_pd": pd_arr * ead,
+                "_expected_default_ead": pd_arr * ead,
+                "_defaulted_ead": defaults * ead,
+            }
+        )
+        grouped = (
+            work.groupby("rating", observed=False)
+            .agg(
+                n_assets=("_default", "size"),
+                total_ead=("_ead", "sum"),
+                defaults=("_default", "sum"),
+                defaulted_ead=("_defaulted_ead", "sum"),
+                avg_pd=("_pd", "mean"),
+                pd_min=("_pd", "min"),
+                pd_max=("_pd", "max"),
+                ead_weighted_pd=("_weighted_pd", "sum"),
+                expected_default_ead=("_expected_default_ead", "sum"),
+            )
+            .reindex(rating_order)
+            .reset_index()
+        )
+        grouped["method"] = method
+        grouped["n_assets"] = grouped["n_assets"].fillna(0).astype(int)
+        grouped["total_ead"] = grouped["total_ead"].fillna(0.0)
+        grouped["defaults"] = grouped["defaults"].fillna(0.0)
+        grouped["defaulted_ead"] = grouped["defaulted_ead"].fillna(0.0)
+        grouped["ead_weighted_pd"] = np.where(
+            grouped["total_ead"] > 0.0,
+            grouped["ead_weighted_pd"] / grouped["total_ead"],
+            np.nan,
+        )
+        grouped["expected_default_ead"] = grouped["expected_default_ead"].fillna(0.0)
+        grouped["observed_default_rate"] = np.where(
+            grouped["n_assets"] > 0,
+            grouped["defaults"] / grouped["n_assets"],
+            np.nan,
+        )
+        grouped["observed_default_ead_rate"] = np.where(
+            grouped["total_ead"] > 0.0,
+            grouped["defaulted_ead"] / grouped["total_ead"],
+            np.nan,
+        )
+        grouped["portfolio_count_share"] = grouped["n_assets"] / len(df)
+        grouped["portfolio_ead_share"] = grouped["total_ead"] / grouped["total_ead"].sum()
+        grouped["pd_lower"] = grouped["rating"].map(scale_bounds["pd_lower"])
+        grouped["pd_upper"] = grouped["rating"].map(scale_bounds["pd_upper"])
+        grouped["pd_avg_master"] = grouped["rating"].map(scale_bounds["pd_avg"])
+        rows.append(grouped)
+
+    return pd.concat(rows, ignore_index=True)[
+        [
+            "method",
+            "rating",
+            "n_assets",
+            "total_ead",
+            "portfolio_count_share",
+            "portfolio_ead_share",
+            "defaults",
+            "observed_default_rate",
+            "observed_default_ead_rate",
+            "avg_pd",
+            "ead_weighted_pd",
+            "pd_min",
+            "pd_max",
+            "pd_lower",
+            "pd_avg_master",
+            "pd_upper",
+            "expected_default_ead",
+            "defaulted_ead",
+        ]
+    ]
+
+
+def rating_migration_matrix(
+    predictions: Mapping[str, np.ndarray | pd.Series],
+    baseline_method: str,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+    normalize: bool = False,
+) -> pd.DataFrame:
+    """Compare fixed-master-scale rating migration from one baseline method."""
+
+    if baseline_method not in predictions:
+        raise KeyError(f"baseline_method '{baseline_method}' is not in predictions")
+
+    baseline_pd = _clip_prob(predictions[baseline_method])
+    baseline_ratings = assign_pd_master_scale_ratings(baseline_pd, rating_order=rating_order)
+    rows = []
+    for method, pd_values in predictions.items():
+        pd_arr = _clip_prob(pd_values)
+        if len(pd_arr) != len(baseline_pd):
+            raise ValueError(f"Prediction length for '{method}' must match baseline length")
+        method_ratings = assign_pd_master_scale_ratings(pd_arr, rating_order=rating_order)
+        matrix = pd.crosstab(
+            pd.Categorical(baseline_ratings, categories=rating_order, ordered=True),
+            pd.Categorical(method_ratings, categories=rating_order, ordered=True),
+            dropna=False,
+            normalize="index" if normalize else False,
+        )
+        matrix.index.name = "baseline_rating"
+        matrix.columns.name = "method_rating"
+        long = matrix.stack().reset_index(name="share" if normalize else "n_assets")
+        long.insert(0, "method", method)
+        rows.append(long)
+
+    return pd.concat(rows, ignore_index=True)
+
+
+def score_distribution_table(
+    scores: np.ndarray | pd.Series,
+    defaults: np.ndarray | pd.Series | None = None,
+    bins: int | np.ndarray = 20,
+) -> pd.DataFrame:
+    """Summarise score distribution for the diagnostic histogram/table."""
+
+    score_arr = _as_1d(scores, "scores")
+    if isinstance(bins, int):
+        bin_edges = np.linspace(float(score_arr.min()), float(score_arr.max()), bins + 1)
+        if np.allclose(bin_edges[0], bin_edges[-1]):
+            bin_edges = np.array([bin_edges[0] - EPS, bin_edges[-1] + EPS])
+    else:
+        bin_edges = np.asarray(bins, dtype=float)
+    score_bins = pd.cut(score_arr, bins=bin_edges, include_lowest=True)
+    work = pd.DataFrame({"score_bin": score_bins, "score": score_arr})
+    if defaults is not None:
+        default_arr = _as_1d(defaults, "defaults")
+        if len(default_arr) != len(score_arr):
+            raise ValueError("defaults must have the same length as scores")
+        work["default"] = default_arr
+        grouped = work.groupby("score_bin", observed=False).agg(
+            n_assets=("score", "size"),
+            score_min=("score", "min"),
+            score_max=("score", "max"),
+            avg_score=("score", "mean"),
+            defaults=("default", "sum"),
+            observed_default_rate=("default", "mean"),
+        )
+    else:
+        grouped = work.groupby("score_bin", observed=False).agg(
+            n_assets=("score", "size"),
+            score_min=("score", "min"),
+            score_max=("score", "max"),
+            avg_score=("score", "mean"),
+        )
+    grouped["portfolio_count_share"] = grouped["n_assets"] / len(score_arr)
+    return grouped.reset_index()
+
+
 def validate_common_rating_structure(
     scale: pd.DataFrame,
     method_col: str = "method",
@@ -508,7 +778,7 @@ def rating_scale_capital(
     assumptions: IRBAssumptions | None = None,
     method_col: str | None = None,
 ) -> pd.DataFrame:
-    """Calculate IRB capital/RWA from rating-level PD and total EAD buckets."""
+    """Calculate 845-P capital from rating-level PD and total EAD buckets."""
 
     _validate_columns(scale, ("pd_rating", "total_ead"))
     grouped = (
@@ -519,22 +789,28 @@ def rating_scale_capital(
 
     rows = []
     for key, frame in grouped:
-        details = calculate_irb_capital(
+        details = calculate_845p_capital(
             frame["pd_rating"].to_numpy(),
             assumptions=assumptions,
             ead_values=frame["total_ead"].to_numpy(),
         )
         row = {
-            "total_ead": float(details["ead"].sum()),
-            "total_expected_loss": float(details["expected_loss"].sum()),
+            "total_ead": float(details["EAD"].sum()),
+            "total_reserves": float(details["Reserves"].sum()),
+            "total_expected_loss": float(details["Reserves"].sum()),
+            "total_rwa_capital": float(details["RWA_capital"].sum()),
             "total_unexpected_loss_capital": float(
-                details["unexpected_loss_capital"].sum()
+                details["RWA_capital"].sum()
             ),
-            "total_rwa": float(details["rwa"].sum()),
-            "total_required_capital": float(details["required_capital"].sum()),
-            "rwa_rate_to_ead": float(details["rwa"].sum() / details["ead"].sum()),
+            "total_capital_true": float(details["Capital_true"].sum()),
+            "total_rwa": float(details["RWA_capital"].sum()),
+            "total_required_capital": float(details["Capital_true"].sum()),
+            "rwa_capital_rate_to_ead": float(
+                details["RWA_capital"].sum() / details["EAD"].sum()
+            ),
+            "rwa_rate_to_ead": float(details["RWA_capital"].sum() / details["EAD"].sum()),
             "required_capital_rate_to_ead": float(
-                details["required_capital"].sum() / details["ead"].sum()
+                details["Capital_true"].sum() / details["EAD"].sum()
             ),
         }
         if method_col is not None:
@@ -543,3 +819,61 @@ def rating_scale_capital(
 
     out = pd.DataFrame(rows)
     return out.set_index(method_col) if method_col is not None else out
+
+
+def master_scale_pd_bound_capital(
+    distribution: pd.DataFrame,
+    assumptions: IRBAssumptions | None = None,
+    method_col: str = "method",
+    pd_bound_cols: tuple[str, ...] = ("pd_lower", "pd_avg_master", "pd_upper"),
+) -> pd.DataFrame:
+    """Calculate 845-P capital using lower/average/upper PD per master-scale bucket."""
+
+    required = (method_col, "total_ead", *pd_bound_cols)
+    _validate_columns(distribution, required)
+    grouped = distribution.groupby(method_col, dropna=False)
+
+    rows = []
+    for method, frame in grouped:
+        for pd_col in pd_bound_cols:
+            active = frame.loc[frame["total_ead"] > 0.0].copy()
+            if active.empty:
+                continue
+            details = calculate_845p_capital(
+                active[pd_col].to_numpy(),
+                assumptions=assumptions,
+                ead_values=active["total_ead"].to_numpy(),
+            )
+            total_ead = float(details["EAD"].sum())
+            row = {
+                method_col: method,
+                "pd_scenario": pd_col,
+                "total_ead": total_ead,
+                "avg_pd_weighted": float(
+                    np.average(active[pd_col], weights=active["total_ead"])
+                ),
+                "total_reserves": float(details["Reserves"].sum()),
+                "total_expected_loss": float(details["Reserves"].sum()),
+                "total_rwa_capital": float(details["RWA_capital"].sum()),
+                "total_unexpected_loss_capital": float(details["RWA_capital"].sum()),
+                "total_capital_true": float(details["Capital_true"].sum()),
+                "total_rwa": float(details["RWA_capital"].sum()),
+                "total_required_capital": float(details["Capital_true"].sum()),
+                "capital_true_rate_to_ead": float(details["Capital_true"].sum() / total_ead),
+            }
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    avg = out.loc[out["pd_scenario"] == "pd_avg_master", [method_col, "total_capital_true"]]
+    if not avg.empty:
+        avg = avg.rename(columns={"total_capital_true": "_avg_capital_true"})
+        out = out.merge(avg, on=method_col, how="left")
+        out["delta_capital_true_vs_avg"] = out["total_capital_true"] - out["_avg_capital_true"]
+        out["delta_capital_true_vs_avg_pct"] = (
+            out["delta_capital_true_vs_avg"] / out["_avg_capital_true"]
+        )
+        out = out.drop(columns="_avg_capital_true")
+    return out.set_index([method_col, "pd_scenario"])
