@@ -149,6 +149,8 @@ def historical_portfolio_panel(
             defaults=(default_col, "sum"),
             defaulted_ead=("_defaulted_ead", "sum"),
             avg_pd=(pd_col, "mean"),
+            pd_min=(pd_col, "min"),
+            pd_max=(pd_col, "max"),
             ead_weighted_pd=("_weighted_pd", "sum"),
             expected_defaults=("_expected_defaults", "sum"),
             expected_default_ead=("_expected_default_ead", "sum"),

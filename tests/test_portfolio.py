@@ -72,6 +72,8 @@ def test_historical_portfolio_panel_preserves_period_rating_structure():
     assert row["n_obs"] == 2
     assert row["defaults"] == 1
     assert row["avg_pd"] == pytest.approx(0.015)
+    assert row["pd_min"] == pytest.approx(0.01)
+    assert row["pd_max"] == pytest.approx(0.02)
     assert row["expected_defaults"] == pytest.approx(0.03)
     assert row["observed_default_rate"] == pytest.approx(0.50)
     assert row["portfolio_count_share"] == pytest.approx(2 / 3)
