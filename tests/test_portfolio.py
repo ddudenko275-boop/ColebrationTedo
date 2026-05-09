@@ -50,6 +50,14 @@ def test_generated_rating_is_kept_out_of_model_features():
     assert "rating" not in x_test.columns
 
 
+def test_normal_portfolio_is_lower_risk_than_stress_portfolio():
+    normal = generate_credit_data(n_samples=2_000, random_state=7, portfolio="normal")
+    stress = generate_credit_data(n_samples=2_000, random_state=7, portfolio="stress")
+
+    assert normal["true_pd"].mean() < stress["true_pd"].mean()
+    assert normal["true_pd"].quantile(0.95) < stress["true_pd"].quantile(0.95)
+
+
 def test_same_year_calibration_test_split_uses_2024_for_both_calib_and_test():
     df = generate_credit_data(n_samples=500, random_state=7)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_same_year_calibration_test_split(df)
