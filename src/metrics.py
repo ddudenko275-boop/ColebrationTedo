@@ -132,64 +132,6 @@ def get_calibration_curve(
     return mean_predicted, fraction_of_positives
 
 
-def calibration_bin_table(
-    y_true: np.ndarray,
-    y_prob: np.ndarray,
-    n_bins: int = 10,
-    strategy: str = "quantile",
-    min_count: int = 1,
-) -> pd.DataFrame:
-    """Return calibration bins with counts, keeping sparse bins explicit.
-
-    Quantile bins are preferable for reliability plots when calibrated PDs are
-    stepwise, as in isotonic regression. Uniform bins are still useful as a
-    diagnostic because they show where the score distribution is sparse.
-    """
-
-    if strategy not in {"uniform", "quantile"}:
-        raise ValueError("strategy must be 'uniform' or 'quantile'")
-    if min_count < 1:
-        raise ValueError("min_count must be at least 1")
-
-    y_true = _as_array(y_true)
-    y_prob = _clip_prob(y_prob)
-
-    if strategy == "uniform":
-        edges = np.linspace(0.0, 1.0, n_bins + 1)
-    else:
-        edges = np.unique(np.quantile(y_prob, np.linspace(0.0, 1.0, n_bins + 1)))
-        if len(edges) < 2:
-            return pd.DataFrame(
-                columns=["bin_left", "bin_right", "n", "share", "avg_pd", "default_rate", "defaults", "is_sparse"]
-            )
-        edges[0] = 0.0
-        edges[-1] = 1.0
-
-    rows = []
-    for i in range(len(edges) - 1):
-        if i == len(edges) - 2:
-            mask = (y_prob >= edges[i]) & (y_prob <= edges[i + 1])
-        else:
-            mask = (y_prob >= edges[i]) & (y_prob < edges[i + 1])
-        n_i = int(mask.sum())
-        if n_i == 0:
-            continue
-        rows.append(
-            {
-                "bin_left": float(edges[i]),
-                "bin_right": float(edges[i + 1]),
-                "n": n_i,
-                "share": n_i / len(y_true),
-                "avg_pd": float(y_prob[mask].mean()),
-                "default_rate": float(y_true[mask].mean()),
-                "defaults": int(y_true[mask].sum()),
-                "is_sparse": n_i < min_count,
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
 def summary_metrics(y_true: np.ndarray, y_prob: np.ndarray, name: str = "") -> dict:
     hl = hosmer_lemeshow_test(y_true, y_prob)
     si = calibration_slope_intercept(y_true, y_prob)
