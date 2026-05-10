@@ -52,7 +52,7 @@ def generate_credit_data(
         oot_lift = 0.18
     else:
         segment_probs = [0.52, 0.33, 0.12, 0.03]
-        base_intercept = -7.15
+        base_intercept = -6.65
         subprime_lift = 0.35
         distressed_lift = 0.75
         oot_lift = 0.10
