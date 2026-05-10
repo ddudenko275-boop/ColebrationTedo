@@ -45,11 +45,11 @@ def generate_credit_data(
     rng = np.random.default_rng(random_state)
 
     if portfolio == "stress":
-        segment_probs = [0.38, 0.34, 0.24, 0.04]
+        segment_probs = [0.38, 0.37, 0.23, 0.02]
         base_intercept = -5.5
         prime_lift = -3.00
         standard_lift = 0.00
-        subprime_lift = 0.55
+        subprime_lift = 0.75
         distressed_lift = 1.10
         oot_lift = 0.18
     else:
