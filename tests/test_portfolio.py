@@ -21,6 +21,7 @@ from src.portfolio import (
     rating_migration_matrix,
     rating_master_scale,
     rating_scale_capital,
+    rating_scale_capital_by_rating,
     score_distribution_table,
     summarize_rating_scale,
     validate_common_rating_structure,
@@ -278,6 +279,35 @@ def test_rating_scale_capital_uses_rating_level_ead_buckets():
     assert out.loc["m1", "total_capital_true"] == pytest.approx(
         out.loc["m1", "total_expected_loss"] + out.loc["m1", "total_rwa"]
     )
+
+
+def test_rating_scale_capital_by_rating_preserves_empty_master_scale_start():
+    scale = pd.DataFrame(
+        {
+            "method": ["m1", "m1", "m1"],
+            "rating": ["A1", "A2", "B1"],
+            "n_assets": [0, 0, 3],
+            "portfolio_count_share": [0.0, 0.0, 1.0],
+            "observed_default_rate": [np.nan, np.nan, 1 / 3],
+            "total_ead": [0.0, 0.0, 3_000_000.0],
+            "pd_min": [np.nan, np.nan, 0.0011],
+            "avg_pd": [np.nan, np.nan, 0.0012],
+            "pd_max": [np.nan, np.nan, 0.0013],
+            "pd_rating": [0.0005, 0.0007, 0.0012],
+        }
+    )
+
+    by_rating = rating_scale_capital_by_rating(
+        scale,
+        method_col="method",
+        rating_order=("A1", "A2", "B1"),
+    )
+    summary = rating_scale_capital(scale, method_col="method")
+
+    assert list(by_rating["rating"].astype(str)) == ["A1", "A2", "B1"]
+    assert by_rating.loc[by_rating["rating"].astype(str) == "A1", "total_rwa"].iloc[0] == 0.0
+    assert by_rating["total_rwa"].sum() == pytest.approx(summary.loc["m1", "total_rwa"])
+    assert by_rating["rwa_share"].fillna(0.0).sum() == pytest.approx(1.0)
 
 
 def test_method_master_scale_distribution_uses_pd_boundaries_per_method():

@@ -823,6 +823,84 @@ def rating_scale_capital(
     return out.set_index(method_col) if method_col is not None else out
 
 
+def rating_scale_capital_by_rating(
+    scale: pd.DataFrame,
+    assumptions: IRBAssumptions | None = None,
+    method_col: str = "method",
+    rating_col: str = "rating",
+    pd_col: str = "pd_rating",
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Calculate rating-level 845-P capital while preserving empty rating buckets."""
+
+    required = (
+        method_col,
+        rating_col,
+        "n_assets",
+        "portfolio_count_share",
+        "observed_default_rate",
+        "total_ead",
+        "pd_min",
+        "avg_pd",
+        "pd_max",
+        pd_col,
+    )
+    _validate_columns(scale, required)
+
+    rows = []
+    for method, frame in scale.groupby(method_col, sort=False, dropna=False):
+        frame = frame.copy()
+        frame[rating_col] = pd.Categorical(
+            frame[rating_col],
+            categories=rating_order,
+            ordered=True,
+        )
+        frame = frame.sort_values(rating_col)
+
+        details = calculate_845p_capital(
+            frame[pd_col].to_numpy(),
+            assumptions=assumptions,
+            ead_values=frame["total_ead"].to_numpy(),
+        )
+        total_rwa = float(details["RWA_capital"].sum())
+        total_required_capital = float(details["Capital_true"].sum())
+
+        for source, capital in zip(
+            frame.itertuples(index=False),
+            details.itertuples(index=False),
+            strict=True,
+        ):
+            row = {
+                method_col: method,
+                rating_col: getattr(source, rating_col),
+                "n_assets": int(source.n_assets),
+                "portfolio_count_share": float(source.portfolio_count_share),
+                "observed_default_rate": float(source.observed_default_rate)
+                if pd.notna(source.observed_default_rate)
+                else np.nan,
+                "total_ead": float(source.total_ead),
+                "pd_min": float(source.pd_min) if pd.notna(source.pd_min) else np.nan,
+                "avg_pd": float(source.avg_pd) if pd.notna(source.avg_pd) else np.nan,
+                "pd_max": float(source.pd_max) if pd.notna(source.pd_max) else np.nan,
+                pd_col: float(getattr(source, pd_col)),
+                "total_expected_loss": float(capital.Reserves),
+                "total_rwa_capital": float(capital.RWA_capital),
+                "total_rwa": float(capital.RWA_capital),
+                "total_required_capital": float(capital.Capital_true),
+            }
+            row["rwa_share"] = (
+                row["total_rwa"] / total_rwa if total_rwa > 0.0 else np.nan
+            )
+            row["capital_share"] = (
+                row["total_required_capital"] / total_required_capital
+                if total_required_capital > 0.0
+                else np.nan
+            )
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def master_scale_pd_bound_capital(
     distribution: pd.DataFrame,
     assumptions: IRBAssumptions | None = None,
