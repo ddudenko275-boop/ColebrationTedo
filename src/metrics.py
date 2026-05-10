@@ -170,7 +170,6 @@ def calibration_bin_table(
                 continue
             rows.append(
                 {
-                    "bin_index": len(rows) + 1,
                     "bin_left": float(y_prob[chunk].min()),
                     "bin_right": float(y_prob[chunk].max()),
                     "n": int(len(chunk)),
@@ -205,7 +204,6 @@ def calibration_bin_table(
             continue
         rows.append(
             {
-                "bin_index": len(rows) + 1,
                 "bin_left": float(edges[i]),
                 "bin_right": float(edges[i + 1]),
                 "n": n_i,
