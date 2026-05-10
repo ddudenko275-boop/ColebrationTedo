@@ -158,12 +158,13 @@ def test_assign_master_scale_ratings_uses_reference_breakpoints():
 
 
 def test_assign_pd_master_scale_ratings_uses_fixed_pd_boundaries():
-    assigned = assign_pd_master_scale_ratings(np.array([0.0003, 0.0007, 0.20, 0.60]))
+    assigned = assign_pd_master_scale_ratings(np.array([0.0050, 0.0120, 0.20, 0.60]))
 
-    assert list(assigned.astype(str)) == ["A1", "A2", "D3", "E"]
+    assert list(assigned.astype(str)) == ["A1", "A2", "D1", "E"]
     scale = master_scale_table()
     assert list(scale.columns) == ["rating", "pd_lower", "pd_upper", "pd_avg"]
     assert scale.loc[scale["rating"] == "E", "pd_upper"].iloc[0] == pytest.approx(1.0)
+    assert (scale["pd_upper"] - scale["pd_lower"]).min() >= 0.0005
 
 
 def test_calibrate_pd_to_target_matches_weighted_average():
@@ -320,8 +321,8 @@ def test_method_master_scale_distribution_uses_pd_boundaries_per_method():
     out = method_master_scale_distribution(df, predictions, ead_col="ead")
 
     assert set(out["method"]) == {"low", "high"}
-    assert out.loc[(out["method"] == "low") & (out["rating"] == "A1"), "n_assets"].iloc[0] == 1
-    assert out.loc[(out["method"] == "high") & (out["rating"] == "E"), "n_assets"].iloc[0] == 1
+    assert out.loc[(out["method"] == "low") & (out["rating"] == "A1"), "n_assets"].iloc[0] == 3
+    assert out.loc[(out["method"] == "high") & (out["rating"] == "D2"), "n_assets"].iloc[0] == 1
 
 
 def test_rating_migration_matrix_counts_moves_from_baseline():
@@ -335,7 +336,7 @@ def test_rating_migration_matrix_counts_moves_from_baseline():
 
     assert shifted["n_assets"].sum() == 3
     assert shifted.loc[
-        (shifted["baseline_rating"] == "A1") & (shifted["method_rating"] == "A2"),
+        (shifted["baseline_rating"] == "A1") & (shifted["method_rating"] == "D1"),
         "n_assets",
     ].iloc[0] == 1
 
