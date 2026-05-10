@@ -143,39 +143,16 @@ def calibration_bin_table(
 
     Quantile bins are preferable for reliability plots when calibrated PDs are
     stepwise, as in isotonic regression. Uniform bins are still useful as a
-    diagnostic because they show where the score distribution is sparse. The
-    ordinal strategy creates equal-count bins after sorting by PD; this is the
-    most stable plotting option for discrete or tied calibrated probabilities.
+    diagnostic because they show where the score distribution is sparse.
     """
 
-    if strategy not in {"uniform", "quantile", "ordinal"}:
-        raise ValueError("strategy must be 'uniform', 'quantile' or 'ordinal'")
+    if strategy not in {"uniform", "quantile"}:
+        raise ValueError("strategy must be 'uniform' or 'quantile'")
     if min_count < 1:
         raise ValueError("min_count must be at least 1")
 
     y_true = _as_array(y_true)
     y_prob = _clip_prob(y_prob)
-
-    if strategy == "ordinal":
-        order = np.argsort(y_prob, kind="mergesort")
-        chunks = np.array_split(order, min(n_bins, len(order)))
-        rows = []
-        for chunk in chunks:
-            if len(chunk) == 0:
-                continue
-            rows.append(
-                {
-                    "bin_left": float(y_prob[chunk].min()),
-                    "bin_right": float(y_prob[chunk].max()),
-                    "n": int(len(chunk)),
-                    "share": len(chunk) / len(y_true),
-                    "avg_pd": float(y_prob[chunk].mean()),
-                    "default_rate": float(y_true[chunk].mean()),
-                    "defaults": int(y_true[chunk].sum()),
-                    "is_sparse": len(chunk) < min_count,
-                }
-            )
-        return pd.DataFrame(rows)
 
     if strategy == "uniform":
         edges = np.linspace(0.0, 1.0, n_bins + 1)
