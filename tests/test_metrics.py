@@ -36,23 +36,3 @@ def test_calibration_bin_table_ordinal_keeps_requested_bin_count_with_ties():
     assert len(table) == 5
     assert table["n"].tolist() == [2, 2, 2, 2, 2]
     assert table["avg_pd"].is_monotonic_increasing
-
-
-def test_calibration_bin_table_ordinal_can_use_common_sort_values():
-    y_true = np.array([0, 1, 0, 1])
-    y_prob = np.array([0.40, 0.10, 0.30, 0.20])
-    common_score = np.array([0.01, 0.02, 0.90, 0.95])
-
-    table = calibration_bin_table(
-        y_true,
-        y_prob,
-        n_bins=2,
-        strategy="ordinal",
-        min_count=1,
-        sort_by=common_score,
-    )
-
-    assert table["n"].tolist() == [2, 2]
-    assert np.isclose(table["avg_pd"].iloc[0], 0.25)
-    assert np.isclose(table["avg_pd"].iloc[1], 0.25)
-    assert table["defaults"].tolist() == [1, 1]

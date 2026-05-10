@@ -138,16 +138,14 @@ def calibration_bin_table(
     n_bins: int = 10,
     strategy: str = "quantile",
     min_count: int = 1,
-    sort_by: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Return calibration bins with counts, keeping sparse bins explicit.
 
     Quantile bins are preferable for reliability plots when calibrated PDs are
     stepwise, as in isotonic regression. Uniform bins are still useful as a
     diagnostic because they show where the score distribution is sparse. The
-    ordinal strategy creates equal-count bins after sorting by ``sort_by`` when
-    provided, otherwise by PD. A common ``sort_by`` series is useful for
-    comparing multiple monotone calibrators on the same borrower groups.
+    ordinal strategy creates equal-count bins after sorting by PD; this is the
+    most stable plotting option for discrete or tied calibrated probabilities.
     """
 
     if strategy not in {"uniform", "quantile", "ordinal"}:
@@ -157,12 +155,9 @@ def calibration_bin_table(
 
     y_true = _as_array(y_true)
     y_prob = _clip_prob(y_prob)
-    sort_values = _clip_prob(sort_by) if sort_by is not None else y_prob
-    if len(sort_values) != len(y_prob):
-        raise ValueError("sort_by must have the same length as y_prob")
 
     if strategy == "ordinal":
-        order = np.argsort(sort_values, kind="mergesort")
+        order = np.argsort(y_prob, kind="mergesort")
         chunks = np.array_split(order, min(n_bins, len(order)))
         rows = []
         for chunk in chunks:
