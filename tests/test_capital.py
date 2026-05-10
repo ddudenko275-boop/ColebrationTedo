@@ -61,6 +61,12 @@ def test_compare_845p_capital_by_method_uses_same_defaults_for_all_methods():
 
     assert out.loc["base", "defaults"] == pytest.approx(1.0)
     assert out.loc["up", "total_rwa_capital"] > out.loc["base", "total_rwa_capital"]
+    assert out.loc["base", "total_regulatory_rwa"] == pytest.approx(
+        out.loc["base", "total_rwa_capital"] / IRBAssumptions().capital_ratio
+    )
+    assert out.loc["base", "h1_if_keep_baseline_ul_capital"] == pytest.approx(
+        IRBAssumptions().capital_ratio
+    )
     assert summarize_845p_capital(predictions["base"], defaults=defaults)["defaults"] == 1.0
 
 

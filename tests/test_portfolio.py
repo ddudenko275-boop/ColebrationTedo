@@ -157,9 +157,9 @@ def test_assign_master_scale_ratings_uses_reference_breakpoints():
 
 
 def test_assign_pd_master_scale_ratings_uses_fixed_pd_boundaries():
-    assigned = assign_pd_master_scale_ratings(np.array([0.0003, 0.0040, 0.20, 0.90]))
+    assigned = assign_pd_master_scale_ratings(np.array([0.0003, 0.0007, 0.20, 0.60]))
 
-    assert list(assigned.astype(str)) == ["A1", "A2", "C3", "E"]
+    assert list(assigned.astype(str)) == ["A1", "A2", "D3", "E"]
     scale = master_scale_table()
     assert list(scale.columns) == ["rating", "pd_lower", "pd_upper", "pd_avg"]
     assert scale.loc[scale["rating"] == "E", "pd_upper"].iloc[0] == pytest.approx(1.0)
@@ -283,8 +283,8 @@ def test_rating_scale_capital_uses_rating_level_ead_buckets():
 def test_method_master_scale_distribution_uses_pd_boundaries_per_method():
     df = pd.DataFrame({"default": [0, 0, 1, 0], "ead": [1.0, 2.0, 3.0, 4.0]})
     predictions = {
-        "low": np.array([0.0003, 0.0040, 0.0200, 0.20]),
-        "high": np.array([0.0040, 0.0200, 0.20, 0.90]),
+        "low": np.array([0.0003, 0.0007, 0.0020, 0.20]),
+        "high": np.array([0.0007, 0.0020, 0.20, 0.30]),
     }
 
     out = method_master_scale_distribution(df, predictions, ead_col="ead")
@@ -296,8 +296,8 @@ def test_method_master_scale_distribution_uses_pd_boundaries_per_method():
 
 def test_rating_migration_matrix_counts_moves_from_baseline():
     predictions = {
-        "base": np.array([0.0010, 0.0040, 0.0200]),
-        "shifted": np.array([0.0040, 0.0200, 0.20]),
+        "base": np.array([0.0005, 0.0007, 0.0020]),
+        "shifted": np.array([0.0007, 0.0020, 0.20]),
     }
 
     out = rating_migration_matrix(predictions, baseline_method="base")
@@ -328,9 +328,9 @@ def test_master_scale_pd_bound_capital_builds_lower_avg_upper_sensitivity():
             "method": ["m1", "m1"],
             "rating": ["A1", "E"],
             "total_ead": [1_000_000.0, 2_000_000.0],
-            "pd_lower": [0.0000, 0.80],
-            "pd_avg_master": [0.0015, 0.90],
-            "pd_upper": [0.0030, 1.00],
+            "pd_lower": [0.0000, 0.26],
+            "pd_avg_master": [0.0005, 0.40],
+            "pd_upper": [0.0006, 1.00],
         }
     )
 

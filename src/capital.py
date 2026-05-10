@@ -241,6 +241,9 @@ def summarize_845p_capital(
 ) -> dict:
     """Summarise portfolio-level 845-P reserves, UL capital and true capital."""
 
+    if assumptions is None:
+        assumptions = IRBAssumptions()
+
     details = calculate_845p_capital(
         pd_values,
         defaults=defaults,
@@ -250,6 +253,7 @@ def summarize_845p_capital(
     total_ead = details["EAD"].sum()
     total_reserves = details["Reserves"].sum()
     total_rwa_capital = details["RWA_capital"].sum()
+    total_regulatory_rwa = total_rwa_capital / assumptions.capital_ratio
     total_capital_true = details["Capital_true"].sum()
     return {
         "avg_pd": details["FRAT_FINAL_PD"].mean(),
@@ -258,11 +262,13 @@ def summarize_845p_capital(
         "total_expected_loss": total_reserves,
         "total_rwa_capital": total_rwa_capital,
         "total_unexpected_loss_capital": total_rwa_capital,
+        "total_regulatory_rwa": total_regulatory_rwa,
         "total_capital_true": total_capital_true,
         "total_rwa": total_rwa_capital,
         "total_required_capital": total_capital_true,
         "reserves_rate_to_ead": total_reserves / total_ead,
         "rwa_capital_rate_to_ead": total_rwa_capital / total_ead,
+        "regulatory_rwa_rate_to_ead": total_regulatory_rwa / total_ead,
         "capital_true_rate_to_ead": total_capital_true / total_ead,
         "defaults": details["DEFAULT_DURING_NEXT_YEAR"].sum(),
     }
@@ -574,6 +580,7 @@ def compare_845p_capital_by_method(
 
     base_capital = out.loc[baseline_method, "total_capital_true"]
     base_rwa_capital = out.loc[baseline_method, "total_rwa_capital"]
+    base_regulatory_rwa = out.loc[baseline_method, "total_regulatory_rwa"]
 
     out["capital_true_saving_vs_baseline"] = base_capital - out["total_capital_true"]
     out["capital_true_saving_vs_baseline_pct"] = (
@@ -590,6 +597,15 @@ def compare_845p_capital_by_method(
     out["rwa_saving_vs_baseline_pct"] = out["rwa_capital_saving_vs_baseline_pct"]
     out["capital_saving_vs_baseline"] = out["capital_true_saving_vs_baseline"]
     out["capital_saving_vs_baseline_pct"] = out["capital_true_saving_vs_baseline_pct"]
+    out["regulatory_rwa_saving_vs_baseline"] = (
+        base_regulatory_rwa - out["total_regulatory_rwa"]
+    )
+    out["regulatory_rwa_saving_vs_baseline_pct"] = (
+        out["regulatory_rwa_saving_vs_baseline"] / base_regulatory_rwa
+    )
+    out["h1_if_keep_baseline_ul_capital"] = (
+        base_rwa_capital / out["total_regulatory_rwa"]
+    )
     return out
 
 

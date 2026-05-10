@@ -45,14 +45,18 @@ def generate_credit_data(
     rng = np.random.default_rng(random_state)
 
     if portfolio == "stress":
-        segment_probs = [0.38, 0.34, 0.20, 0.08]
+        segment_probs = [0.38, 0.34, 0.24, 0.04]
         base_intercept = -5.5
+        prime_lift = -3.00
+        standard_lift = 0.00
         subprime_lift = 0.55
         distressed_lift = 1.10
         oot_lift = 0.18
     else:
         segment_probs = [0.52, 0.33, 0.12, 0.03]
         base_intercept = -6.65
+        prime_lift = 0.00
+        standard_lift = 0.00
         subprime_lift = 0.35
         distressed_lift = 0.75
         oot_lift = 0.10
@@ -78,13 +82,29 @@ def generate_credit_data(
         m = int(idx.sum())
 
         if seg == 0:
-            credit_score[idx] = rng.normal(760, 45, m)
-            ltv[idx] = 0.05 + rng.beta(2.0, 5.0, m) * 0.60
-            dti[idx] = 0.03 + rng.beta(2.0, 7.0, m) * 0.45
-            employment_years[idx] = np.clip(rng.normal(9, 4, m), 0, 35)
+            credit_score[idx] = (
+                rng.normal(790, 35, m)
+                if portfolio == "stress"
+                else rng.normal(760, 45, m)
+            )
+            ltv[idx] = (
+                0.02 + rng.beta(1.8, 7.0, m) * 0.45
+                if portfolio == "stress"
+                else 0.05 + rng.beta(2.0, 5.0, m) * 0.60
+            )
+            dti[idx] = (
+                0.02 + rng.beta(1.8, 8.0, m) * 0.35
+                if portfolio == "stress"
+                else 0.03 + rng.beta(2.0, 7.0, m) * 0.45
+            )
+            employment_years[idx] = np.clip(
+                rng.normal(10, 4, m) if portfolio == "stress" else rng.normal(9, 4, m),
+                0,
+                35,
+            )
             loan_amount[idx] = rng.lognormal(11.6, 0.45, m) / 1000
             loan_term[idx] = rng.choice([12, 24, 36, 48, 60], m, p=[0.15, 0.25, 0.25, 0.20, 0.15])
-            num_delinquencies[idx] = rng.poisson(0.08, m)
+            num_delinquencies[idx] = rng.poisson(0.02 if portfolio == "stress" else 0.08, m)
             loan_purpose[idx] = rng.choice([0, 1, 2], m, p=[0.50, 0.20, 0.30])
         elif seg == 1:
             credit_score[idx] = rng.normal(660, 55, m)
@@ -132,6 +152,8 @@ def generate_credit_data(
         + 0.18 * (loan_amount > np.quantile(loan_amount, 0.80)).astype(float)
         + 0.28 * ((ltv > 0.85) & (dti > 0.55)).astype(float)
         + 0.32 * ((credit_score < 500) & (num_delinquencies >= 2)).astype(float)
+        + prime_lift * (risk_segment == 0).astype(float)
+        + standard_lift * (risk_segment == 1).astype(float)
         + subprime_lift * (risk_segment == 2).astype(float)
         + distressed_lift * (risk_segment == 3).astype(float)
         + 0.32 * (origination_year == 2020).astype(float)
