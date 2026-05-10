@@ -25,3 +25,14 @@ def test_calibration_bin_table_quantile_bins_avoid_empty_uniform_gaps():
     assert table["avg_pd"].is_monotonic_increasing
     assert table["bin_left"].iloc[0] == 0.0
     assert table["bin_right"].iloc[-1] == 1.0
+
+
+def test_calibration_bin_table_ordinal_keeps_requested_bin_count_with_ties():
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 1, 1])
+    y_prob = np.array([0.01, 0.01, 0.01, 0.01, 0.20, 0.20, 0.20, 0.60, 0.60, 0.60])
+
+    table = calibration_bin_table(y_true, y_prob, n_bins=5, strategy="ordinal", min_count=2)
+
+    assert len(table) == 5
+    assert table["n"].tolist() == [2, 2, 2, 2, 2]
+    assert table["avg_pd"].is_monotonic_increasing
