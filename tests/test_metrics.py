@@ -34,6 +34,7 @@ def test_calibration_bin_table_ordinal_keeps_requested_bin_count_with_ties():
     table = calibration_bin_table(y_true, y_prob, n_bins=5, strategy="ordinal", min_count=2)
 
     assert len(table) == 5
+    assert table["bin_index"].tolist() == [1, 2, 3, 4, 5]
     assert table["n"].tolist() == [2, 2, 2, 2, 2]
     assert table["avg_pd"].is_monotonic_increasing
 
