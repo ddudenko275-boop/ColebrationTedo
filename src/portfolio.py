@@ -27,6 +27,23 @@ MASTER_SCALE_RATINGS = (
     "D3",
     "E",
 )
+MASTER_SCALE_PD_BOUNDS = {
+    "A1": (0.0000, 0.0006, 0.0005),
+    "A2": (0.0006, 0.0008, 0.0007),
+    "A3": (0.0008, 0.0010, 0.0009),
+    "B1": (0.0010, 0.0014, 0.0012),
+    "B2": (0.0014, 0.0030, 0.0022),
+    "B3": (0.0030, 0.0065, 0.0047),
+    "C1": (0.0065, 0.0105, 0.0085),
+    "C2": (0.0105, 0.0182, 0.0155),
+    # Mentor table has C3 average PD below its lower bound. Keep the mentor
+    # lower/upper boundaries and use the bucket midpoint for capital.
+    "C3": (0.0182, 0.0291, 0.02365),
+    "D1": (0.0291, 0.0576, 0.0405),
+    "D2": (0.0576, 0.1407, 0.1032),
+    "D3": (0.1407, 0.2600, 0.1998),
+    "E": (0.2600, 1.0000, 0.4000),
+}
 DEFAULT_ASSET_EAD = 1_000_000.0
 EPS = 1e-6
 
@@ -281,6 +298,161 @@ def assign_master_scale_ratings(
         )
     edges[0], edges[-1] = -np.inf, np.inf
     return pd.cut(values, bins=edges, labels=ratings, include_lowest=True, ordered=True)
+
+
+def master_scale_bounds_table(
+    bounds: Mapping[str, tuple[float, float, float]] = MASTER_SCALE_PD_BOUNDS,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Return the fixed mentor PD master scale in rating order A1...E."""
+
+    rows = []
+    for rating in rating_order:
+        lower, upper, average = bounds[rating]
+        if not 0.0 <= lower < upper <= 1.0:
+            raise ValueError(f"Invalid PD interval for rating {rating}: {(lower, upper)}")
+        if not lower <= average <= upper:
+            raise ValueError(f"Representative PD is outside interval for {rating}")
+        rows.append(
+            {
+                "rating": rating,
+                "pd_lower": float(lower),
+                "pd_upper": float(upper),
+                "pd_avg_master": float(average),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def assign_pd_master_scale_ratings(
+    pd_values: np.ndarray | pd.Series,
+    bounds: Mapping[str, tuple[float, float, float]] = MASTER_SCALE_PD_BOUNDS,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.Categorical:
+    """Assign fixed master-scale ratings from calibrated PD values."""
+
+    values = _clip_prob(pd_values)
+    scale = master_scale_bounds_table(bounds=bounds, rating_order=rating_order)
+    edges = [float(scale["pd_lower"].iloc[0]), *scale["pd_upper"].astype(float).tolist()]
+    edges[0] = 0.0
+    edges[-1] = 1.0
+    return pd.cut(
+        values,
+        bins=edges,
+        labels=rating_order,
+        include_lowest=True,
+        right=True,
+        ordered=True,
+    )
+
+
+def method_master_scale_distribution(
+    df: pd.DataFrame,
+    predictions: Mapping[str, np.ndarray | pd.Series],
+    default_col: str = "default",
+    ead_col: str | None = None,
+    default_asset_ead: float = DEFAULT_ASSET_EAD,
+    bounds: Mapping[str, tuple[float, float, float]] = MASTER_SCALE_PD_BOUNDS,
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Bucket each method's PDs into the fixed A1...E mentor master scale.
+
+    All ratings are returned for every method. Empty ratings are represented by
+    zero-count rows, so downstream tables and charts always start at A1.
+    """
+
+    if not predictions:
+        raise ValueError("predictions must contain at least one method")
+    _validate_columns(df, (default_col,))
+
+    ead = _resolve_rating_ead(df, ead_col, default_asset_ead)
+    defaults = df[default_col].to_numpy(dtype=float)
+    scale = master_scale_bounds_table(bounds=bounds, rating_order=rating_order)
+
+    rows = []
+    for method, values in predictions.items():
+        pd_arr = _clip_prob(values)
+        if len(pd_arr) != len(df):
+            raise ValueError(
+                f"Prediction length for '{method}' must match df length: "
+                f"{len(pd_arr)} != {len(df)}"
+            )
+
+        ratings = assign_pd_master_scale_ratings(
+            pd_arr,
+            bounds=bounds,
+            rating_order=rating_order,
+        )
+        work = pd.DataFrame(
+            {
+                "rating": ratings,
+                "_pd": pd_arr,
+                "_ead": ead,
+                "_default": defaults,
+            }
+        )
+        work["_defaulted_ead"] = work["_default"] * work["_ead"]
+        work["_expected_default_ead"] = work["_pd"] * work["_ead"]
+
+        grouped = (
+            work.groupby("rating", observed=False)
+            .agg(
+                n_assets=("_default", "size"),
+                total_ead=("_ead", "sum"),
+                defaults=("_default", "sum"),
+                defaulted_ead=("_defaulted_ead", "sum"),
+                avg_pd=("_pd", "mean"),
+                expected_defaults=("_pd", "sum"),
+                expected_default_ead=("_expected_default_ead", "sum"),
+                pd_min_actual=("_pd", "min"),
+                pd_max_actual=("_pd", "max"),
+            )
+            .reindex(rating_order)
+            .reset_index()
+        )
+        grouped.insert(0, "method", method)
+        grouped = grouped.merge(scale, on="rating", how="left")
+        rows.append(grouped)
+
+    out = pd.concat(rows, ignore_index=True)
+    numeric_zero_cols = (
+        "n_assets",
+        "total_ead",
+        "defaults",
+        "defaulted_ead",
+        "expected_defaults",
+        "expected_default_ead",
+    )
+    out[list(numeric_zero_cols)] = out[list(numeric_zero_cols)].fillna(0.0)
+    out["n_assets"] = out["n_assets"].astype(int)
+    out["avg_pd"] = out["avg_pd"].fillna(out["pd_avg_master"])
+    out["pd_min_actual"] = out["pd_min_actual"].fillna(out["pd_lower"])
+    out["pd_max_actual"] = out["pd_max_actual"].fillna(out["pd_upper"])
+    out["pd_rating"] = out["pd_avg_master"]
+    out["one_minus_pd"] = 1.0 - out["pd_rating"]
+    out["observed_default_rate"] = np.where(
+        out["n_assets"] > 0,
+        out["defaults"] / out["n_assets"],
+        0.0,
+    )
+    out["portfolio_count_share"] = (
+        out["n_assets"] / out.groupby("method")["n_assets"].transform("sum")
+    )
+    out["portfolio_ead_share"] = np.where(
+        out.groupby("method")["total_ead"].transform("sum") > 0,
+        out["total_ead"] / out.groupby("method")["total_ead"].transform("sum"),
+        0.0,
+    )
+    out["master_expected_defaults"] = out["pd_rating"] * out["n_assets"]
+    out["master_expected_default_ead"] = out["pd_rating"] * out["total_ead"]
+    out["default_gap"] = out["defaults"] - out["master_expected_defaults"]
+    out["default_ead_gap"] = out["defaulted_ead"] - out["master_expected_default_ead"]
+    out["calibration_ratio"] = np.where(
+        out["master_expected_defaults"] > 0.0,
+        out["defaults"] / out["master_expected_defaults"],
+        np.nan,
+    )
+    return out
 
 
 def calibrate_pd_to_target(
@@ -543,3 +715,54 @@ def rating_scale_capital(
 
     out = pd.DataFrame(rows)
     return out.set_index(method_col) if method_col is not None else out
+
+
+def rating_scale_capital_by_rating(
+    scale: pd.DataFrame,
+    assumptions: IRBAssumptions | None = None,
+    method_col: str | None = None,
+    rating_col: str = "rating",
+    pd_col: str = "pd_rating",
+    rating_order: tuple[str, ...] = MASTER_SCALE_RATINGS,
+) -> pd.DataFrame:
+    """Calculate IRB capital/RWA by rating and preserve the full A1...E axis."""
+
+    _validate_columns(scale, (rating_col, pd_col, "total_ead"))
+    grouped = (
+        scale.groupby(method_col, dropna=False)
+        if method_col is not None
+        else [(None, scale)]
+    )
+
+    rows = []
+    for key, frame in grouped:
+        work = frame.set_index(rating_col).reindex(rating_order).reset_index()
+        default_pd_by_rating = (
+            master_scale_bounds_table()
+            .set_index("rating")["pd_avg_master"]
+            .to_dict()
+        )
+        work[pd_col] = work[pd_col].fillna(work[rating_col].map(default_pd_by_rating))
+        work["total_ead"] = work["total_ead"].fillna(0.0)
+        details = calculate_irb_capital(
+            work[pd_col].to_numpy(dtype=float),
+            assumptions=assumptions,
+            ead_values=work["total_ead"].to_numpy(dtype=float),
+        )
+        for idx, rating in enumerate(work[rating_col]):
+            row = {
+                "rating": rating,
+                "pd_rating": float(work[pd_col].iloc[idx]),
+                "total_ead": float(details["ead"][idx]),
+                "total_expected_loss": float(details["expected_loss"][idx]),
+                "total_unexpected_loss_capital": float(
+                    details["unexpected_loss_capital"][idx]
+                ),
+                "total_rwa": float(details["rwa"][idx]),
+                "total_required_capital": float(details["required_capital"][idx]),
+            }
+            if method_col is not None:
+                row[method_col] = key
+            rows.append(row)
+
+    return pd.DataFrame(rows)
