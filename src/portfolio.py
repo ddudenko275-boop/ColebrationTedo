@@ -702,6 +702,10 @@ def rating_scale_capital(
             "total_unexpected_loss_capital": float(
                 details["unexpected_loss_capital"].sum()
             ),
+            "total_el_plus_ul_capital": float(
+                details["expected_loss"].sum()
+                + details["unexpected_loss_capital"].sum()
+            ),
             "total_rwa": float(details["rwa"].sum()),
             "total_required_capital": float(details["required_capital"].sum()),
             "rwa_rate_to_ead": float(details["rwa"].sum() / details["ead"].sum()),
@@ -757,6 +761,10 @@ def rating_scale_capital_by_rating(
                 "total_expected_loss": float(details["expected_loss"][idx]),
                 "total_unexpected_loss_capital": float(
                     details["unexpected_loss_capital"][idx]
+                ),
+                "total_el_plus_ul_capital": float(
+                    details["expected_loss"][idx]
+                    + details["unexpected_loss_capital"][idx]
                 ),
                 "total_rwa": float(details["rwa"][idx]),
                 "total_required_capital": float(details["required_capital"][idx]),

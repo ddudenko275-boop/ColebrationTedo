@@ -185,6 +185,10 @@ def test_rating_scale_capital_by_rating_preserves_zero_ead_ratings():
     assert len(out) == 13
     assert out.loc[out["rating"] == "A2", "total_ead"].iloc[0] == 0.0
     assert out.loc[out["rating"] == "A2", "total_rwa"].iloc[0] == 0.0
+    assert out["total_el_plus_ul_capital"].sum() == pytest.approx(
+        out["total_expected_loss"].sum()
+        + out["total_unexpected_loss_capital"].sum()
+    )
     assert out["total_rwa"].sum() > 0.0
 
 
@@ -287,4 +291,8 @@ def test_rating_scale_capital_uses_rating_level_ead_buckets():
 
     assert out.loc["m1", "total_ead"] == pytest.approx(3_000_000.0)
     assert out.loc["m1", "total_expected_loss"] > 0.0
+    assert out.loc["m1", "total_el_plus_ul_capital"] == pytest.approx(
+        out.loc["m1", "total_expected_loss"]
+        + out.loc["m1", "total_unexpected_loss_capital"]
+    )
     assert out.loc["m1", "total_rwa"] > out.loc["m1", "total_expected_loss"]

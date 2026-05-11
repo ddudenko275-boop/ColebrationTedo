@@ -197,6 +197,10 @@ def summarize_irb_capital(
         "total_ead": total_ead,
         "total_expected_loss": details["expected_loss"].sum(),
         "total_unexpected_loss_capital": details["unexpected_loss_capital"].sum(),
+        "total_el_plus_ul_capital": (
+            details["expected_loss"].sum()
+            + details["unexpected_loss_capital"].sum()
+        ),
         "total_rwa": details["rwa"].sum(),
         "total_required_capital": details["required_capital"].sum(),
         "expected_loss_rate_to_ead": details["expected_loss"].sum() / total_ead,
