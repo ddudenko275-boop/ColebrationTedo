@@ -33,6 +33,15 @@ def test_capital_stress_scenarios_default_shape_and_base_delta():
     assert out.loc["Combined adverse", "delta_required_capital"] > 0.0
 
 
+def test_summarize_irb_capital_reports_el_plus_ul_capital():
+    summary = summarize_irb_capital(sample_pd(), assumptions=IRBAssumptions())
+
+    assert summary["total_el_plus_ul_capital"] == pytest.approx(
+        summary["total_expected_loss"]
+        + summary["total_unexpected_loss_capital"]
+    )
+
+
 def test_custom_stress_scenario_applies_ead_vector_multiplier():
     pd_values = sample_pd()
     ead_values = np.linspace(500_000.0, 1_500_000.0, len(pd_values))
