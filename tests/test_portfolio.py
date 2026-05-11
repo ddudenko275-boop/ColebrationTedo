@@ -4,16 +4,21 @@ import pytest
 
 from data.generate_data import generate_credit_data, get_oot_split
 from src.portfolio import (
+    MASTER_SCALE_PD_BOUNDS,
     MASTER_SCALE_RATINGS,
     assign_master_scale_ratings,
+    assign_pd_master_scale_ratings,
     calibrate_pd_to_target,
     compare_methods_by_rating_master_scale,
     compare_methods_by_historical_panel,
     historical_portfolio_panel,
+    master_scale_bounds_table,
+    method_master_scale_distribution,
     method_portfolio_summary,
     portfolio_average_pd,
     rating_master_scale,
     rating_scale_capital,
+    rating_scale_capital_by_rating,
     summarize_rating_scale,
     validate_common_rating_structure,
 )
@@ -126,6 +131,61 @@ def test_assign_master_scale_ratings_uses_reference_breakpoints():
 
     assert list(assigned.astype(str)) == ["A1", "C1", "E"]
     assert len(MASTER_SCALE_RATINGS) == 13
+
+
+def test_master_scale_bounds_table_uses_mentor_boundaries():
+    bounds = master_scale_bounds_table()
+
+    assert list(bounds["rating"]) == list(MASTER_SCALE_RATINGS)
+    assert bounds.loc[bounds["rating"] == "A1", "pd_lower"].iloc[0] == pytest.approx(0.0)
+    assert bounds.loc[bounds["rating"] == "A1", "pd_upper"].iloc[0] == pytest.approx(0.0006)
+    assert bounds.loc[bounds["rating"] == "E", "pd_lower"].iloc[0] == pytest.approx(0.26)
+    assert bounds.loc[bounds["rating"] == "E", "pd_upper"].iloc[0] == pytest.approx(1.0)
+    assert MASTER_SCALE_PD_BOUNDS["D2"] == pytest.approx((0.0576, 0.1407, 0.1032))
+
+
+def test_assign_pd_master_scale_ratings_uses_fixed_pd_boundaries():
+    pd_values = np.array([0.0001, 0.0007, 0.0012, 0.0040, 0.0200, 0.0800, 0.5000])
+
+    assigned = assign_pd_master_scale_ratings(pd_values)
+
+    assert list(assigned.astype(str)) == ["A1", "A2", "B1", "B3", "C3", "D2", "E"]
+
+
+def test_method_master_scale_distribution_keeps_full_axis_from_a1():
+    df = pd.DataFrame({"default": [0, 1, 0, 1]})
+    predictions = {
+        "low": np.array([0.0001, 0.0002, 0.0003, 0.0004]),
+        "high": np.array([0.30, 0.40, 0.50, 0.60]),
+    }
+
+    out = method_master_scale_distribution(df, predictions, default_asset_ead=100.0)
+
+    assert out.groupby("method").size().to_dict() == {"high": 13, "low": 13}
+    assert out.groupby("method")["rating"].first().to_dict() == {"high": "A1", "low": "A1"}
+    assert out.loc[(out["method"] == "low") & (out["rating"] == "A1"), "n_assets"].iloc[0] == 4
+    assert out.loc[(out["method"] == "low") & (out["rating"] == "A2"), "n_assets"].iloc[0] == 0
+    assert out.loc[(out["method"] == "high") & (out["rating"] == "E"), "n_assets"].iloc[0] == 4
+    assert out.loc[(out["method"] == "high") & (out["rating"] == "A1"), "total_ead"].iloc[0] == 0.0
+
+
+def test_rating_scale_capital_by_rating_preserves_zero_ead_ratings():
+    scale = pd.DataFrame(
+        {
+            "method": ["m1", "m1"],
+            "rating": ["A1", "E"],
+            "pd_rating": [0.0005, 0.40],
+            "total_ead": [100.0, 200.0],
+        }
+    )
+
+    out = rating_scale_capital_by_rating(scale, method_col="method")
+
+    assert list(out["rating"].head(3)) == ["A1", "A2", "A3"]
+    assert len(out) == 13
+    assert out.loc[out["rating"] == "A2", "total_ead"].iloc[0] == 0.0
+    assert out.loc[out["rating"] == "A2", "total_rwa"].iloc[0] == 0.0
+    assert out["total_rwa"].sum() > 0.0
 
 
 def test_calibrate_pd_to_target_matches_weighted_average():
