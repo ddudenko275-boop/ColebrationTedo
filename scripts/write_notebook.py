@@ -156,6 +156,114 @@ cells.append({
     )
 })
 
+# Cell 10 - raw score bell chart
+cells.append({
+    "cell_type": "markdown",
+    "metadata": {},
+    "source": (
+        "### 3.1. Bell chart: base model raw scores before calibration\n\n"
+        "The next chart uses the uncalibrated RF probabilities as raw PD scores. "
+        "The first part of the PD axis is intentionally split into narrower buckets, "
+        "because most observations sit close to low PD values. The narrow zone is "
+        "shown directly on the chart, so the distribution shape is not confused with "
+        "an equal-width PD scale."
+    ),
+})
+
+cells.append({
+    "cell_type": "code",
+    "execution_count": None,
+    "metadata": {},
+    "outputs": [],
+    "source": (
+        "raw_pd_edges = np.array([\n"
+        "    0.000, 0.005, 0.0075, 0.010, 0.015, 0.020, 0.030,\n"
+        "    0.050, 0.075, 0.100, 0.150, 0.200, 0.300, 0.450, 0.650, 1.000,\n"
+        "])\n"
+        "\n"
+        "raw_score_frame = pd.DataFrame({\n"
+        '    "raw_pd": scores_test,\n'
+        '    "default": y_test.values,\n'
+        "})\n"
+        'raw_score_frame["pd_bin"] = pd.cut(\n'
+        '    raw_score_frame["raw_pd"],\n'
+        "    bins=raw_pd_edges,\n"
+        "    include_lowest=True,\n"
+        "    right=True,\n"
+        ")\n"
+        "\n"
+        "raw_bin_summary = (\n"
+        '    raw_score_frame.groupby("pd_bin", observed=False)\n'
+        "    .agg(\n"
+        '        n_assets=("raw_pd", "size"),\n'
+        '        defaults=("default", "sum"),\n'
+        '        avg_raw_pd=("raw_pd", "mean"),\n'
+        "    )\n"
+        "    .reset_index()\n"
+        ")\n"
+        'raw_bin_summary["pd_left"] = raw_pd_edges[:-1]\n'
+        'raw_bin_summary["pd_right"] = raw_pd_edges[1:]\n'
+        'raw_bin_summary["pd_width"] = raw_bin_summary["pd_right"] - raw_bin_summary["pd_left"]\n'
+        'raw_bin_summary["non_defaults"] = raw_bin_summary["n_assets"] - raw_bin_summary["defaults"]\n'
+        'raw_bin_summary["bad_rate"] = np.where(\n'
+        '    raw_bin_summary["n_assets"] > 0,\n'
+        '    raw_bin_summary["defaults"] / raw_bin_summary["n_assets"],\n'
+        "    np.nan,\n"
+        ")\n"
+        'raw_bin_summary["asset_share"] = raw_bin_summary["n_assets"] / len(raw_score_frame)\n'
+        'raw_bin_summary["default_share"] = raw_bin_summary["defaults"] / max(raw_score_frame["default"].sum(), 1)\n'
+        'raw_bin_summary["non_default_share"] = raw_bin_summary["non_defaults"] / max((raw_score_frame["default"] == 0).sum(), 1)\n'
+        "\n"
+        "bin_labels = [\n"
+        '    f"{left:.1%}-{right:.1%}"\n'
+        "    for left, right in zip(raw_pd_edges[:-1], raw_pd_edges[1:])\n"
+        "]\n"
+        "x = np.arange(len(bin_labels))\n"
+        "bar_width = 0.38\n"
+        "\n"
+        "fig, ax = plt.subplots(figsize=(14, 5.5))\n"
+        'ax.axvspan(-0.5, 5.5, color="#f2f5f7", alpha=0.95, zorder=0)\n'
+        'ax.axvline(5.5, color="gray", linestyle="--", lw=1.1, alpha=0.8)\n'
+        "ax.bar(\n"
+        "    x - bar_width / 2,\n"
+        '    raw_bin_summary["non_default_share"] * 100,\n'
+        "    width=bar_width,\n"
+        '    color="#7a7a7a",\n'
+        '    label="Non-defaults: share inside class",\n'
+        "    alpha=0.90,\n"
+        ")\n"
+        "ax.bar(\n"
+        "    x + bar_width / 2,\n"
+        '    raw_bin_summary["default_share"] * 100,\n'
+        "    width=bar_width,\n"
+        '    color="#48c7c4",\n'
+        '    label="Defaults: share inside class",\n'
+        "    alpha=0.92,\n"
+        ")\n"
+        "\n"
+        'ax.text(2.5, ax.get_ylim()[1] * 0.92, "narrow low-PD buckets", ha="center", va="top", color="#555")\n'
+        "ax.set_xticks(x)\n"
+        'ax.set_xticklabels(bin_labels, rotation=45, ha="right")\n'
+        'ax.set_xlabel("Raw RF PD score bucket; bucket width is shown in labels")\n'
+        'ax.set_ylabel("Share of class, %")\n'
+        'ax.set_title("Bell chart of uncalibrated RF scores: defaults vs non-defaults")\n'
+        'ax.legend(loc="upper right")\n'
+        'ax.grid(axis="y", alpha=0.35)\n'
+        "\n"
+        "plt.tight_layout()\n"
+        "plt.show()\n"
+        "\n"
+        'display_cols = ["pd_left", "pd_right", "pd_width", "n_assets", "defaults", "bad_rate", "avg_raw_pd"]\n'
+        "raw_bin_summary[display_cols].style.format({\n"
+        '    "pd_left": "{:.3%}",\n'
+        '    "pd_right": "{:.3%}",\n'
+        '    "pd_width": "{:.3%}",\n'
+        '    "bad_rate": "{:.2%}",\n'
+        '    "avg_raw_pd": "{:.2%}",\n'
+        "})"
+    ),
+})
+
 # Cell 10 - markdown
 cells.append({"cell_type": "markdown", "metadata": {}, "source": "## 4. Обучение калибраторов на Calibration (2022-2023)"})
 
