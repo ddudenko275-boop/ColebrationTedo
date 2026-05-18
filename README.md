@@ -1,36 +1,37 @@
-# PD Calibration And Capital Impact Lab
+# PD Calibration and Capital Impact Lab
 
-Проект про калибровку Probability of Default (PD) в банковском кредитном риске: сравнение методов калибровки, out-of-time validation, диагностика качества вероятностей и оценка эффекта на Basel-style RWA / capital.
+This project studies Probability of Default (PD) calibration in banking credit risk. It compares calibration methods, out-of-time validation, probability-quality diagnostics, binomial z-stat checks, and the effect of calibrated PD on Basel-style RWA and capital.
 
-## Что внутри
+## Contents
 
-- `notebooks/pd_calibration.ipynb` - основной исследовательский notebook.
-- `src/calibrators.py` - методы калибровки PD: logit/Platt, isotonic, beta, spline.
-- `src/metrics.py` - метрики калибровки, дискриминации и стабильности.
-- `src/capital.py` - Basel-style расчет expected loss, unexpected-loss capital и RWA.
-- `data/generate_data.py` - генерация синтетического кредитного портфеля.
-- `docs/references.md` - статьи и регуляторные источники, на которые опирается проект.
+- `notebooks/pd_calibration.ipynb` - main research notebook.
+- `notebooks/pd_calibration_legacy.ipynb` - archived legacy note that points to the current notebook.
+- `src/calibrators.py` - PD calibration methods: logit/Platt, isotonic, beta, monotone spline, and French spline.
+- `src/metrics.py` - calibration, discrimination, and stability metrics.
+- `src/capital.py` - Basel-style expected loss, unexpected-loss capital, and RWA calculations.
+- `data/generate_data.py` - synthetic credit portfolio generation.
+- `docs/references.md` - academic and regulatory references used by the project.
 
-## Основная идея
+## Core Idea
 
-Базовая ML-модель может хорошо ранжировать заемщиков, но ее вероятности дефолта не обязательно хорошо откалиброваны. Для банковской практики это важно, потому что PD влияет не только на качество риск-оценки, но и на резервы, RWA и требуемый капитал.
+A base ML model can rank borrowers well, but its default probabilities may still be poorly calibrated. In banking practice, this matters because PD affects not only risk-score quality, but also reserves, RWA, and required capital.
 
-В проекте сравниваются несколько подходов:
+The project compares several approaches:
 
-- логит-калибровка / Platt scaling;
-- изотоническая регрессия;
+- logit calibration / Platt scaling;
+- isotonic regression;
 - beta calibration;
-- монотонная spline-калибровка;
-- двухшаговая схема logit + monotone spline, вдохновленная практикой PD-калибровки и ICAS-style моделей.
+- monotone spline calibration;
+- a two-stage logit + monotone spline scheme inspired by practical PD calibration and ICAS-style models.
 
-## Методологическая рамка
+## Methodological Frame
 
-Статистическое качество оценивается через Brier Score, Log-Loss, ECE, Hosmer-Lemeshow, calibration slope/intercept, AUC/Gini/KS и bootstrap confidence intervals.
+Statistical quality is assessed with Brier Score, Log-Loss, ECE, Hosmer-Lemeshow, calibration slope/intercept, AUC/Gini/KS, bootstrap confidence intervals, and binomial z-stat diagnostics by calibration bins and fixed master-scale buckets.
 
-Экономический эффект оценивается отдельно: calibrated PD подаются в Basel-style IRB расчет, где считаются expected loss, unexpected-loss capital, RWA и capital impact относительно некалиброванной модели.
+The economic effect is assessed separately: calibrated PD values are passed into a Basel-style IRB calculation to estimate expected loss, unexpected-loss capital, RWA, and capital impact relative to logit calibration.
 
-Подробный список источников лежит в `docs/references.md`.
+The full source list is available in `docs/references.md`.
 
-## Важное ограничение
+## Important Limitation
 
-Проект использует синтетический портфель и упрощенную IRB-style формулу. Результаты подходят для исследования чувствительности капитала к калибровке PD, но не являются готовым регуляторным расчетом для отчетности банка.
+The project uses a synthetic portfolio and a simplified IRB-style formula. Results are suitable for studying capital sensitivity to PD calibration, but they are not a production regulatory reporting calculation for a bank.

@@ -29,8 +29,8 @@ def _safe_logit(values: np.ndarray) -> np.ndarray:
 
 def _interp_with_boundaries(interp, x: np.ndarray, x_min: float, x_max: float, y_min: float, y_max: float) -> np.ndarray:
     """
-    PCHIP аккуратно работает внутри диапазона.
-    За пределами calibration-диапазона фиксируем крайние значения.
+    PCHIP behaves well inside the observed calibration range.
+    Outside that range, boundary values are held constant.
     """
     x = _as_1d(x)
     y = interp(x)
@@ -45,7 +45,7 @@ class LogitCalibrator:
     """
     Platt-style logistic calibration.
 
-    Модель строит преобразование:
+    The model learns the transformation:
     raw RF-score -> logit(raw RF-score) -> calibrated PD
     """
 
@@ -70,9 +70,9 @@ class LogitCalibrator:
 
 class IsotonicCalibrator:
     """
-    Непараметрическая монотонная калибровка.
+    Non-parametric monotone calibration.
 
-    Хорошо ловит нелинейности, но может давать ступенчатую функцию.
+    It captures nonlinearities well, but can produce a stepwise function.
     """
 
     def __init__(self):
@@ -93,7 +93,7 @@ class BetaCalibrator:
     """
     Beta calibration.
 
-    Более гибкая параметрическая калибровка:
+    A more flexible parametric calibration:
     PD = sigmoid(a * log(s) + b * log(1 - s) + c)
     """
 
@@ -158,10 +158,9 @@ def _bin_stats(
     alpha: float = 20.0
 ) -> pd.DataFrame:
     """
-    Строим статистику по квантильным бинам.
+    Build statistics by quantile bins.
 
-    alpha — сглаживание default rate.
-    Оно защищает от слишком резких значений в маленьких бинах.
+    alpha controls default-rate smoothing and protects small bins from overly sharp values.
     """
 
     scores = _as_1d(scores)
@@ -212,10 +211,10 @@ def _bin_stats(
 
 class MonotoneSplineCalibrator:
     """
-    Монотонный сплайн.
+    Monotone spline.
 
-    Логика:
-    RF-score -> бины -> сглаженная default rate -> isotonic -> PCHIP.
+    Pipeline:
+    RF score -> bins -> smoothed default rate -> isotonic -> PCHIP.
     """
 
     def __init__(self, n_bins: int = 30, alpha: float = 20.0):
@@ -288,13 +287,13 @@ class MonotoneSplineCalibrator:
 
 class FrenchSplineCalibrator:
     """
-    Двухэтапная калибровка:
+    Two-stage calibration:
 
-    1. LogitCalibrator задает стабильный общий уровень PD.
-    2. Сплайн корректирует остаточную ошибку в logit-пространстве.
+    1. LogitCalibrator sets a stable overall PD level.
+    2. A spline adjusts the residual error in logit space.
 
-    В отличие от простой версии, здесь сплайн не просто повторяет обычный
-    MonotoneSplineCalibrator, а работает как поправка к логит-калибровке.
+    Unlike the plain monotone spline, this version works as a correction
+    to logit calibration rather than repeating the same object.
     """
 
     def __init__(
@@ -320,11 +319,11 @@ class FrenchSplineCalibrator:
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "FrenchSplineCalibrator":
         y = np.asarray(y, dtype=float)
 
-        # Шаг 1: базовая логит-калибровка.
+        # Step 1: base logit calibration.
         self.logit_stage.fit(scores, y)
         p_logit = self.logit_stage.predict(scores)
 
-        # Шаг 2: строим бины уже по логит-калиброванной PD.
+        # Step 2: build bins using the logit-calibrated PD.
         stat = _bin_stats(
             scores=p_logit,
             y=y,
@@ -336,7 +335,7 @@ class FrenchSplineCalibrator:
         r = _clip_prob(stat["default_rate_smooth"].to_numpy())
         w = stat["n"].to_numpy()
 
-        # Сначала делаем монотонную эмпирическую default rate.
+        # First make the empirical default rate monotone.
         iso = IsotonicRegression(
             increasing=True,
             out_of_bounds="clip"
@@ -344,14 +343,14 @@ class FrenchSplineCalibrator:
 
         r_iso = _clip_prob(iso.fit_transform(p_bin, r, sample_weight=w))
 
-        # Важное отличие:
-        # обычный сплайн строит p -> empirical default rate.
-        # французский сплайн строит поправку в logit-пространстве.
+        # Key distinction:
+        # the plain spline learns p -> empirical default rate,
+        # while the French spline learns a correction in logit space.
         x = _safe_logit(p_bin)
         z_logit = _safe_logit(p_bin)
         z_empirical = _safe_logit(r_iso)
 
-        # shrinkage не дает сплайну полностью "сломать" стабильную логит-калибровку.
+        # shrinkage prevents the spline from fully overriding the stable logit calibration.
         y_target = (1.0 - self.shrinkage) * z_logit + self.shrinkage * z_empirical
 
         x_u, idx = np.unique(x, return_index=True)
@@ -434,13 +433,13 @@ def spline_smoothing_analysis(
 
 def get_all_calibrators() -> dict:
     """
-    Набор калибраторов для сравнения.
+    Calibration methods used in the comparison.
     """
 
     return {
-        "Логит-калибровка": LogitCalibrator(),
-        "Изотоническая регрессия": IsotonicCalibrator(),
-        "Бета-калибровка": BetaCalibrator(),
-        "Монотонный сплайн": MonotoneSplineCalibrator(),
-        "Французский сплайн": FrenchSplineCalibrator(),
+        "Logit calibration": LogitCalibrator(),
+        "Isotonic regression": IsotonicCalibrator(),
+        "Beta calibration": BetaCalibrator(),
+        "Monotone spline": MonotoneSplineCalibrator(),
+        "French spline": FrenchSplineCalibrator(),
     }
