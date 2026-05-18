@@ -41,10 +41,38 @@ def test_generated_rating_is_kept_out_of_model_features():
     x_train, x_calib, x_test, *_ = get_oot_split(df)
 
     assert "rating" in df.columns
-    assert set(df["rating"].unique()) <= {"A", "B", "C", "D"}
+    assert set(df["rating"].unique()) <= {"A", "B", "C", "D", "E"}
     assert "rating" not in x_train.columns
     assert "rating" not in x_calib.columns
     assert "rating" not in x_test.columns
+
+
+def test_generated_portfolio_uses_five_year_a_to_e_rating_structure():
+    df = generate_credit_data(random_state=7)
+
+    assert len(df) == 40_000
+    assert sorted(df["origination_year"].unique()) == [2020, 2021, 2022, 2023, 2024]
+    rating_share = df["rating"].value_counts(normalize=True)
+    assert set(rating_share.index) == {"A", "B", "C", "D", "E"}
+    assert rating_share[["B", "C"]].sum() > 0.70
+    assert (df.groupby("rating")["true_pd"].min() >= 0.0).all()
+
+
+def test_oot_split_uses_same_in_time_period_for_train_and_calibration():
+    df = generate_credit_data(random_state=7)
+    x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
+    in_time_count = int(df["origination_year"].isin([2020, 2021, 2022, 2023]).sum())
+    oot_count = int((df["origination_year"] == 2024).sum())
+
+    assert len(x_train) == in_time_count
+    assert len(x_calib) == in_time_count
+    assert len(x_test) == oot_count
+    assert set(df.loc[y_train.index, "origination_year"]) == {2020, 2021, 2022, 2023}
+    assert y_train.index.equals(y_calib.index)
+    assert x_train.index.equals(x_calib.index)
+    assert set(df.loc[y_test.index, "origination_year"]) == {2024}
+    assert y_train.index.intersection(y_test.index).empty
+    assert y_calib.index.intersection(y_test.index).empty
 
 
 def test_historical_portfolio_panel_preserves_period_rating_structure():

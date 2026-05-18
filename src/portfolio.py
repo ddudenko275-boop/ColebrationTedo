@@ -11,7 +11,7 @@ from scipy.special import expit
 
 from src.capital import IRBAssumptions, calculate_irb_capital
 
-DEFAULT_RATING_ORDER = ("A", "B", "C", "D")
+DEFAULT_RATING_ORDER = ("A", "B", "C", "D", "E")
 MASTER_SCALE_RATINGS = (
     "A1",
     "A2",
