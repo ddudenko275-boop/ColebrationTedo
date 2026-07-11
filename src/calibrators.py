@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from scipy.interpolate import PchipInterpolator
-from scipy.optimize import minimize
+from scipy.optimize import brentq, minimize
 from scipy.special import expit, logit
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
@@ -25,6 +25,91 @@ def _clip_prob(values: np.ndarray) -> np.ndarray:
 
 def _safe_logit(values: np.ndarray) -> np.ndarray:
     return logit(_clip_prob(values))
+
+
+def _fit_logit_shift_to_mean(values: np.ndarray, target_mean: float) -> float:
+    """Find a logit-scale intercept shift that makes mean PD equal target_mean."""
+
+    target = float(np.clip(target_mean, EPS, 1.0 - EPS))
+    base = _clip_prob(values)
+    if np.isclose(float(base.mean()), target, atol=1e-12):
+        return 0.0
+
+    base_logit = _safe_logit(base)
+
+    def objective(shift: float) -> float:
+        return float(expit(base_logit + shift).mean() - target)
+
+    return float(brentq(objective, -50.0, 50.0))
+
+
+def _extend_monotone_support(
+    x: np.ndarray,
+    y: np.ndarray,
+    x_min: float,
+    x_max: float,
+    y_lower: float | None = None,
+    y_upper: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extend monotone spline knots from bin centers to observed score bounds."""
+
+    x = _as_1d(x)
+    y = _as_1d(y)
+
+    def clip_y(value: float) -> float:
+        if y_lower is not None:
+            value = max(float(y_lower), value)
+        if y_upper is not None:
+            value = min(float(y_upper), value)
+        return float(value)
+
+    if x_min < x[0]:
+        left_slope = (y[1] - y[0]) / (x[1] - x[0])
+        y_left = min(y[0], clip_y(float(y[0] + left_slope * (x_min - x[0]))))
+        x = np.r_[float(x_min), x]
+        y = np.r_[y_left, y]
+
+    if x_max > x[-1]:
+        right_slope = (y[-1] - y[-2]) / (x[-1] - x[-2])
+        y_right = max(y[-1], clip_y(float(y[-1] + right_slope * (x_max - x[-1]))))
+        x = np.r_[x, float(x_max)]
+        y = np.r_[y, y_right]
+
+    return x, y
+
+
+def _spline_knot_diagnostics(
+    stat: pd.DataFrame,
+    target_col: str,
+    score_col: str = "score_mean",
+) -> pd.DataFrame:
+    """Return knot-level slope diagnostics for fitted bin-based splines."""
+
+    if target_col not in stat.columns:
+        raise ValueError(f"Column {target_col!r} is not available in bin_stats_.")
+
+    out = stat.copy().reset_index(drop=True)
+    x = out[score_col].to_numpy(dtype=float)
+    y = out[target_col].to_numpy(dtype=float)
+
+    dx = np.diff(x)
+    dy = np.diff(y)
+    slope = np.r_[np.nan, np.divide(dy, dx, out=np.full_like(dy, np.nan), where=dx != 0.0)]
+    slope_change = np.r_[np.nan, np.diff(slope)]
+
+    out["spline_target"] = y
+    out["local_slope"] = slope
+    out["local_slope_change"] = slope_change
+    out["abs_local_slope_change"] = np.abs(slope_change)
+
+    finite_change = out["abs_local_slope_change"].replace([np.inf, -np.inf], np.nan).dropna()
+    if len(finite_change) > 0:
+        threshold = float(finite_change.quantile(0.75))
+        out["candidate_switch_knot"] = out["abs_local_slope_change"] >= threshold
+    else:
+        out["candidate_switch_knot"] = False
+
+    return out
 
 
 def _interp_with_boundaries(interp, x: np.ndarray, x_min: float, x_max: float, y_min: float, y_max: float) -> np.ndarray:
@@ -216,6 +301,11 @@ class MonotoneSplineCalibrator:
 
     Логика:
     RF-score -> бины -> сглаженная default rate -> isotonic -> PCHIP.
+
+    This is a calibration spline with quantile-bin knots, not a regression
+    spline that optimizes structural breakpoints. After the spline shape is
+    fitted, a logit-scale intercept shift preserves the fit-sample central
+    tendency exactly.
     """
 
     def __init__(self, n_bins: int = 30, alpha: float = 20.0):
@@ -229,8 +319,13 @@ class MonotoneSplineCalibrator:
         self.x_max_: float | None = None
         self.y_min_: float | None = None
         self.y_max_: float | None = None
+        self.target_pd_: float | None = None
+        self.ct_shift_: float = 0.0
+        self.x_knots_: np.ndarray | None = None
+        self.y_knots_: np.ndarray | None = None
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "MonotoneSplineCalibrator":
+        y = np.asarray(y, dtype=float)
         stat = _bin_stats(
             scores=scores,
             y=y,
@@ -255,6 +350,16 @@ class MonotoneSplineCalibrator:
         if len(x_u) < 2:
             raise ValueError("At least two unique score bins are required.")
 
+        score_values = _as_1d(scores)
+        x_u, y_u = _extend_monotone_support(
+            x_u,
+            y_u,
+            float(score_values.min()),
+            float(score_values.max()),
+            y_lower=EPS,
+            y_upper=1.0 - EPS,
+        )
+
         self._interp = PchipInterpolator(
             x_u,
             y_u,
@@ -265,12 +370,19 @@ class MonotoneSplineCalibrator:
         self.x_max_ = float(x_u[-1])
         self.y_min_ = float(y_u[0])
         self.y_max_ = float(y_u[-1])
+        self.x_knots_ = x_u.copy()
+        self.y_knots_ = y_u.copy()
 
         self.bin_stats_ = stat.assign(default_rate_iso=r_iso)
+        self.target_pd_ = float(y.mean())
+        self.ct_shift_ = _fit_logit_shift_to_mean(
+            self._predict_without_ct_shift(scores),
+            self.target_pd_,
+        )
 
         return self
 
-    def predict(self, scores: np.ndarray) -> np.ndarray:
+    def _predict_without_ct_shift(self, scores: np.ndarray) -> np.ndarray:
         if self._interp is None:
             raise RuntimeError("MonotoneSplineCalibrator must be fitted before predict().")
 
@@ -285,6 +397,22 @@ class MonotoneSplineCalibrator:
 
         return _clip_prob(y)
 
+    def predict(self, scores: np.ndarray) -> np.ndarray:
+        y = self._predict_without_ct_shift(scores)
+        return _clip_prob(expit(_safe_logit(y) + self.ct_shift_))
+
+    def knot_diagnostics(self) -> pd.DataFrame:
+        """
+        Return bin/knot diagnostics with a first-derivative proxy.
+
+        candidate_switch_knot marks the largest local slope changes. It is a
+        diagnostic for review, not an automatic breakpoint test.
+        """
+
+        if self.bin_stats_ is None:
+            raise RuntimeError("MonotoneSplineCalibrator must be fitted before diagnostics.")
+        return _spline_knot_diagnostics(self.bin_stats_, target_col="default_rate_iso")
+
 
 class FrenchSplineCalibrator:
     """
@@ -295,6 +423,10 @@ class FrenchSplineCalibrator:
 
     В отличие от простой версии, здесь сплайн не просто повторяет обычный
     MonotoneSplineCalibrator, а работает как поправка к логит-калибровке.
+
+    As with MonotoneSplineCalibrator, knots are derived from quantile bins.
+    The final logit-scale intercept shift is part of the fitted calibrator and
+    preserves the fit-sample central tendency exactly.
     """
 
     def __init__(
@@ -316,6 +448,10 @@ class FrenchSplineCalibrator:
         self.x_max_: float | None = None
         self.y_min_: float | None = None
         self.y_max_: float | None = None
+        self.target_pd_: float | None = None
+        self.ct_shift_: float = 0.0
+        self.x_knots_: np.ndarray | None = None
+        self.y_knots_: np.ndarray | None = None
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "FrenchSplineCalibrator":
         y = np.asarray(y, dtype=float)
@@ -360,6 +496,14 @@ class FrenchSplineCalibrator:
         if len(x_u) < 2:
             raise ValueError("At least two unique bins are required.")
 
+        z_values = _safe_logit(p_logit)
+        x_u, y_u = _extend_monotone_support(
+            x_u,
+            y_u,
+            float(z_values.min()),
+            float(z_values.max()),
+        )
+
         self._interp = PchipInterpolator(
             x_u,
             y_u,
@@ -370,15 +514,22 @@ class FrenchSplineCalibrator:
         self.x_max_ = float(x_u[-1])
         self.y_min_ = float(y_u[0])
         self.y_max_ = float(y_u[-1])
+        self.x_knots_ = x_u.copy()
+        self.y_knots_ = y_u.copy()
 
         self.bin_stats_ = stat.assign(
             default_rate_iso=r_iso,
             logit_target=y_target
         )
+        self.target_pd_ = float(y.mean())
+        self.ct_shift_ = _fit_logit_shift_to_mean(
+            self._predict_without_ct_shift(scores),
+            self.target_pd_,
+        )
 
         return self
 
-    def predict(self, scores: np.ndarray) -> np.ndarray:
+    def _predict_without_ct_shift(self, scores: np.ndarray) -> np.ndarray:
         if self._interp is None:
             raise RuntimeError("FrenchSplineCalibrator must be fitted before predict().")
 
@@ -395,6 +546,24 @@ class FrenchSplineCalibrator:
         )
 
         return _clip_prob(expit(z_adj))
+
+    def predict(self, scores: np.ndarray) -> np.ndarray:
+        y = self._predict_without_ct_shift(scores)
+        return _clip_prob(expit(_safe_logit(y) + self.ct_shift_))
+
+    def knot_diagnostics(self) -> pd.DataFrame:
+        """
+        Return bin/knot diagnostics with a first-derivative proxy.
+
+        For the French spline the target is shown on the PD scale even though
+        the fitted spline correction is built in logit space.
+        """
+
+        if self.bin_stats_ is None:
+            raise RuntimeError("FrenchSplineCalibrator must be fitted before diagnostics.")
+        stat = self.bin_stats_.copy()
+        stat["logit_target_pd"] = _clip_prob(expit(stat["logit_target"].to_numpy(dtype=float)))
+        return _spline_knot_diagnostics(stat, target_col="logit_target_pd")
 
 
 def spline_smoothing_analysis(
