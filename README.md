@@ -5,11 +5,15 @@
 ## Что внутри
 
 - `notebooks/pd_calibration.ipynb` - основной исследовательский notebook.
+- `notebooks/monte_carlo.py` - Monte Carlo проверка устойчивости калибровок к составу портфеля (ресемплинг ~80% без переобучения модели).
 - `src/calibrators.py` - методы калибровки PD: logit/Platt, isotonic, beta, spline.
 - `src/metrics.py` - метрики калибровки, дискриминации и стабильности.
 - `src/capital.py` - Basel-style расчет expected loss, unexpected-loss capital и RWA.
 - `data/generate_data.py` - генерация синтетического кредитного портфеля.
+- `scripts/spline_parameter_search.py` - data-driven подбор параметров сплайн-калибраторов.
 - `docs/references.md` - статьи и регуляторные источники, на которые опирается проект.
+- `docs/spline_methodology.md` - разбор методологии сплайн-калибраторов и обоснование переработки 2026-07.
+- `docs/calibration_change_report.md` - журнал методологических изменений калибровки.
 
 ## Основная идея
 

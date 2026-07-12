@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
 
@@ -48,30 +50,47 @@ def _extend_monotone_support(
     y: np.ndarray,
     x_min: float,
     x_max: float,
-    y_lower: float | None = None,
-    y_upper: float | None = None,
+    y_is_probability: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Extend monotone spline knots from bin centers to observed score bounds."""
+    """Extend monotone spline knots to the observed score bounds.
+
+    The added boundary point is projected linearly using the slope between
+    the last two real knots. When y is a raw probability
+    (y_is_probability=True, MonotoneSplineCalibrator's case), the projection
+    is done in logit space and mapped back with expit: this keeps the curve
+    rising past the last real knot -- unlike a flat clip, which can freeze a
+    wide plateau when the last quantile bin is far from the true max score
+    because the tail is sparse -- while naturally saturating toward 0/1
+    instead of overshooting the way a linear projection directly in
+    probability space can (see docs/spline_methodology.md, §3.3, for why both
+    a flat clip and a plain probability-space linear extrapolation were
+    unsatisfactory here).
+
+    FrenchSplineCalibrator's knots are already on the logit scale
+    (y_is_probability=False): the projection there is a plain linear one, and
+    expit() is applied once downstream when the calibrator converts back to
+    probability.
+    """
 
     x = _as_1d(x)
     y = _as_1d(y)
 
-    def clip_y(value: float) -> float:
-        if y_lower is not None:
-            value = max(float(y_lower), value)
-        if y_upper is not None:
-            value = min(float(y_upper), value)
-        return float(value)
+    def project(x_edge: float, x_a: float, y_a: float, x_b: float, y_b: float) -> float:
+        if y_is_probability:
+            z_a, z_b = _safe_logit(np.array([y_a, y_b]))
+        else:
+            z_a, z_b = y_a, y_b
+        slope = (z_b - z_a) / (x_b - x_a)
+        z_edge = z_b + slope * (x_edge - x_b)
+        return float(expit(z_edge)) if y_is_probability else float(z_edge)
 
     if x_min < x[0]:
-        left_slope = (y[1] - y[0]) / (x[1] - x[0])
-        y_left = min(y[0], clip_y(float(y[0] + left_slope * (x_min - x[0]))))
+        y_left = project(x_min, x[1], y[1], x[0], y[0])
         x = np.r_[float(x_min), x]
         y = np.r_[y_left, y]
 
     if x_max > x[-1]:
-        right_slope = (y[-1] - y[-2]) / (x[-1] - x[-2])
-        y_right = max(y[-1], clip_y(float(y[-1] + right_slope * (x_max - x[-1]))))
+        y_right = project(x_max, x[-2], y[-2], x[-1], y[-1])
         x = np.r_[x, float(x_max)]
         y = np.r_[y, y_right]
 
@@ -240,13 +259,16 @@ def _bin_stats(
     scores: np.ndarray,
     y: np.ndarray,
     n_bins: int = 30,
-    alpha: float = 20.0
 ) -> pd.DataFrame:
     """
     Строим статистику по квантильным бинам.
 
-    alpha — сглаживание default rate.
-    Оно защищает от слишком резких значений в маленьких бинах.
+    default_rate_raw идет в isotonic regression напрямую, взвешенно по n —
+    сглаживание делает сама isotonic regression (PAVA), без дополнительного
+    сдвига к базовой ставке портфеля перед ней. Двойное сглаживание (сначала
+    shrinkage к base_rate, потом isotonic поверх) может схлопывать соседние
+    бины в плоский участок, который не отражает реальной формы данных
+    (см. docs/spline_methodology.md, §3.2).
     """
 
     scores = _as_1d(scores)
@@ -270,8 +292,6 @@ def _bin_stats(
         duplicates="drop"
     )
 
-    base_rate = float(tmp["y"].mean())
-
     stat = (
         tmp
         .groupby("bin", observed=True)
@@ -286,12 +306,6 @@ def _bin_stats(
 
     stat["default_rate_raw"] = stat["defaults"] / stat["n"]
 
-    stat["default_rate_smooth"] = (
-        stat["defaults"] + alpha * base_rate
-    ) / (
-        stat["n"] + alpha
-    )
-
     return stat
 
 
@@ -300,17 +314,23 @@ class MonotoneSplineCalibrator:
     Монотонный сплайн.
 
     Логика:
-    RF-score -> бины -> сглаженная default rate -> isotonic -> PCHIP.
+    RF-score -> бины -> isotonic (взвешенная по n) -> PCHIP.
 
     This is a calibration spline with quantile-bin knots, not a regression
-    spline that optimizes structural breakpoints. After the spline shape is
-    fitted, a logit-scale intercept shift preserves the fit-sample central
-    tendency exactly.
+    spline that optimizes structural breakpoints. Smoothing is done once, by
+    isotonic regression itself (weighted by bin size); there is no separate
+    shrinkage-to-base-rate step before it (see docs/spline_methodology.md,
+    §3.2, for why stacking two smoothing steps produced artificial flat
+    segments). After the spline shape is fitted, a logit-scale intercept
+    shift preserves the fit-sample central tendency exactly.
+
+    n_bins default (75) comes from scripts/spline_parameter_search.py's data
+    floor -- the largest bin count that still keeps ~20 expected defaults per
+    bin on this portfolio -- not from a target economic outcome.
     """
 
-    def __init__(self, n_bins: int = 30, alpha: float = 20.0):
+    def __init__(self, n_bins: int = 75):
         self.n_bins = n_bins
-        self.alpha = alpha
 
         self._interp: PchipInterpolator | None = None
         self.bin_stats_: pd.DataFrame | None = None
@@ -330,11 +350,10 @@ class MonotoneSplineCalibrator:
             scores=scores,
             y=y,
             n_bins=self.n_bins,
-            alpha=self.alpha
         )
 
         x = stat["score_mean"].to_numpy()
-        r = stat["default_rate_smooth"].to_numpy()
+        r = stat["default_rate_raw"].to_numpy()
         w = stat["n"].to_numpy()
 
         iso = IsotonicRegression(
@@ -356,8 +375,6 @@ class MonotoneSplineCalibrator:
             y_u,
             float(score_values.min()),
             float(score_values.max()),
-            y_lower=EPS,
-            y_upper=1.0 - EPS,
         )
 
         self._interp = PchipInterpolator(
@@ -406,7 +423,10 @@ class MonotoneSplineCalibrator:
         Return bin/knot diagnostics with a first-derivative proxy.
 
         candidate_switch_knot marks the largest local slope changes. It is a
-        diagnostic for review, not an automatic breakpoint test.
+        diagnostic for review, not an automatic breakpoint test. Using the
+        spline's first derivative to locate regression switching points
+        follows Ilyasov (2018), DOI 10.18721/JE.11412 (see
+        docs/spline_methodology.md, §3.7).
         """
 
         if self.bin_stats_ is None:
@@ -416,7 +436,8 @@ class MonotoneSplineCalibrator:
 
 class FrenchSplineCalibrator:
     """
-    Двухэтапная калибровка:
+    Двухэтапная калибровка (logit + spline "polish", по методике,
+    комбинирующей логит-калибровку со сплайн-сглаживанием поверх):
 
     1. LogitCalibrator задает стабильный общий уровень PD.
     2. Сплайн корректирует остаточную ошибку в logit-пространстве.
@@ -424,19 +445,24 @@ class FrenchSplineCalibrator:
     В отличие от простой версии, здесь сплайн не просто повторяет обычный
     MonotoneSplineCalibrator, а работает как поправка к логит-калибровке.
 
-    As with MonotoneSplineCalibrator, knots are derived from quantile bins.
-    The final logit-scale intercept shift is part of the fitted calibrator and
-    preserves the fit-sample central tendency exactly.
+    As with MonotoneSplineCalibrator, knots are derived from quantile bins and
+    smoothed once by isotonic regression (weighted by bin size), without a
+    separate pre-isotonic shrinkage step. The final logit-scale intercept
+    shift is part of the fitted calibrator and preserves the fit-sample
+    central tendency exactly.
+
+    n_bins default (75) is the same data-floor pick as MonotoneSplineCalibrator.
+    shrinkage default (0.9) minimizes OOT Brier score on this portfolio in
+    scripts/spline_parameter_search.py -- note the fit is quite flat for
+    shrinkage above ~0.6, so this choice is not highly sensitive.
     """
 
     def __init__(
         self,
-        n_bins: int = 30,
-        alpha: float = 20.0,
-        shrinkage: float = 0.6
+        n_bins: int = 75,
+        shrinkage: float = 0.9
     ):
         self.n_bins = n_bins
-        self.alpha = alpha
         self.shrinkage = shrinkage
 
         self.logit_stage = LogitCalibrator()
@@ -465,11 +491,10 @@ class FrenchSplineCalibrator:
             scores=p_logit,
             y=y,
             n_bins=self.n_bins,
-            alpha=self.alpha
         )
 
         p_bin = _clip_prob(stat["score_mean"].to_numpy())
-        r = _clip_prob(stat["default_rate_smooth"].to_numpy())
+        r = _clip_prob(stat["default_rate_raw"].to_numpy())
         w = stat["n"].to_numpy()
 
         # Сначала делаем монотонную эмпирическую default rate.
@@ -502,6 +527,7 @@ class FrenchSplineCalibrator:
             y_u,
             float(z_values.min()),
             float(z_values.max()),
+            y_is_probability=False,
         )
 
         self._interp = PchipInterpolator(
@@ -571,20 +597,25 @@ def spline_smoothing_analysis(
     y_calib: np.ndarray,
     scores_test: np.ndarray,
     y_test: np.ndarray,
-    lam_grid: np.ndarray | None = None,
-    n_bins: int = 30,
+    n_bins_grid: Iterable[int] | None = None,
 ) -> pd.DataFrame:
-    """Compare monotone spline smoothing values for legacy notebook runs."""
+    """Compare monotone spline smoothing (by n_bins) for legacy notebook runs.
 
-    if lam_grid is None:
-        lam_grid = np.logspace(-2, 2, 9)
+    n_bins is now the only smoothing knob MonotoneSplineCalibrator exposes:
+    isotonic regression (weighted by bin size) does the smoothing directly,
+    there is no separate alpha shrinkage parameter to sweep anymore (see
+    docs/spline_methodology.md, §3.2 and §4).
+    """
+
+    if n_bins_grid is None:
+        n_bins_grid = (10, 15, 20, 25, 30, 40, 50, 75, 100)
 
     y_calib = np.asarray(y_calib, dtype=float)
     y_test = np.asarray(y_test, dtype=float)
 
     rows = []
-    for lam in lam_grid:
-        cal = MonotoneSplineCalibrator(n_bins=n_bins, alpha=float(lam))
+    for n_bins in n_bins_grid:
+        cal = MonotoneSplineCalibrator(n_bins=int(n_bins))
         cal.fit(scores_calib, y_calib)
 
         pred_calib = cal.predict(scores_calib)
@@ -592,7 +623,7 @@ def spline_smoothing_analysis(
 
         rows.append(
             {
-                "lam": float(lam),
+                "n_bins": int(n_bins),
                 "brier_calib": float(np.mean((y_calib - pred_calib) ** 2)),
                 "brier_test": float(np.mean((y_test - pred_test) ** 2)),
             }

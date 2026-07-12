@@ -44,6 +44,23 @@
 - **On the appropriateness of Platt scaling in classifier calibration**. 2021.  
   https://doi.org/10.1016/j.is.2020.101641
 
+## Spline Methodology (переработка 2026-07)
+
+Подробный разбор — в `docs/spline_methodology.md`; эти источники обосновывают текущую конструкцию сплайн-калибраторов.
+
+- Jiang, X., Osl, M., Kim, J., Ohno-Machado, L. **Smooth Isotonic Regression: A New Method to Calibrate Predictive Models**. AMIA Summits on Translational Science, 2011. Основа связки isotonic → PCHIP в `MonotoneSplineCalibrator`.  
+  https://pmc.ncbi.nlm.nih.gov/articles/PMC3248752/
+
+- Lucena, B. **Spline-Based Probability Calibration**. 2018. Современная альтернатива (регуляризованная логрегрессия на сплайн-базисе); реализация — пакет `ml-insights`.  
+  https://arxiv.org/abs/1809.07751
+
+- Пуарье, Д. **Эконометрия структурных изменений (с особым акцентом на сплайн-функции)**. М.: Финансы и статистика, 1981 (ориг. 1976). Гл. 7 — статистическое тестирование положения узла; §8.5 — правила Уолда для выбора узлов и предостережение против подбора узлов под желаемый результат.
+
+- Ильясов, Р.Х. **Сплайн-моделирование и анализ взаимосвязей в экономике при возможном наличии точек переключения регрессии**. НТВ СПбГПУ. Экономические науки, 11(4), 2018. Обоснование `knot_diagnostics()`: поиск точек переключения через первую производную сплайна.  
+  https://doi.org/10.18721/JE.11412
+
+- **Численные методы для экономических расчетов** (учебное пособие). Формальные определения линейного/параболического/кубического сплайна и понятие дефекта сплайна — обоснование выбора PCHIP (дефект 1, монотонность важнее гладкости второй производной).
+
 ## Credit Scoring, Splines, And Class Imbalance
 
 - **Approaches for credit scorecard calibration: An empirical analysis**. 2017.  

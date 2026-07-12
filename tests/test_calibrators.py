@@ -15,8 +15,8 @@ def synthetic_scores_and_defaults() -> tuple[np.ndarray, np.ndarray]:
 @pytest.mark.parametrize(
     "calibrator",
     [
-        MonotoneSplineCalibrator(n_bins=20, alpha=35.0),
-        FrenchSplineCalibrator(n_bins=20, alpha=35.0, shrinkage=0.6),
+        MonotoneSplineCalibrator(n_bins=20),
+        FrenchSplineCalibrator(n_bins=20, shrinkage=0.6),
     ],
 )
 def test_spline_calibrators_preserve_fit_central_tendency(calibrator):
@@ -32,7 +32,7 @@ def test_spline_calibrators_preserve_fit_central_tendency(calibrator):
 
 def test_monotone_spline_extends_support_to_observed_score_bounds():
     scores, y = synthetic_scores_and_defaults()
-    calibrator = MonotoneSplineCalibrator(n_bins=20, alpha=35.0)
+    calibrator = MonotoneSplineCalibrator(n_bins=20)
 
     calibrator.fit(scores, y)
 
@@ -45,7 +45,7 @@ def test_monotone_spline_extends_support_to_observed_score_bounds():
 
 def test_french_spline_does_not_clamp_at_last_bin_mean():
     scores, y = synthetic_scores_and_defaults()
-    calibrator = FrenchSplineCalibrator(n_bins=20, alpha=35.0, shrinkage=0.6)
+    calibrator = FrenchSplineCalibrator(n_bins=20, shrinkage=0.6)
 
     calibrator.fit(scores, y)
 
@@ -57,8 +57,8 @@ def test_french_spline_does_not_clamp_at_last_bin_mean():
 @pytest.mark.parametrize(
     "calibrator",
     [
-        MonotoneSplineCalibrator(n_bins=20, alpha=10.0),
-        FrenchSplineCalibrator(n_bins=20, alpha=10.0, shrinkage=0.6),
+        MonotoneSplineCalibrator(n_bins=20),
+        FrenchSplineCalibrator(n_bins=20, shrinkage=0.6),
     ],
 )
 def test_spline_knot_diagnostics_keep_ct_and_expose_local_slope(calibrator):
