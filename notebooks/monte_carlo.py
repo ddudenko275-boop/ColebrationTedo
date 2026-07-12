@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from data.generate_data import generate_credit_data, get_oot_split
 from src.calibrators import get_all_calibrators
-from src.capital import IRBAssumptions, summarize_irb_capital
+from src.capital import IRBAssumptions, calculate_irb_capital
 
 RANDOM_STATE = 42
 DEFAULT_CAPITAL_ASSUMPTIONS = IRBAssumptions(lgd=0.40, maturity_years=2.5, ead=1_000_000.0)
@@ -41,6 +41,16 @@ METRIC_COLUMNS = (
     "rwa",
     "required_capital",
 )
+# Per-row IRB capital columns that are additive over the portfolio, so a
+# subsample total is just the sum of the sampled rows. This is what lets a
+# 1000-scenario run reuse one precomputed per-row table instead of recomputing
+# the IRB formula in every scenario.
+_CAPITAL_ROW_COLUMNS = {
+    "expected_loss": "expected_loss",
+    "unexpected_loss_capital": "unexpected_loss_capital",
+    "rwa": "rwa",
+    "required_capital": "required_capital",
+}
 
 
 def _quantile_reliability_table(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
@@ -76,13 +86,23 @@ def min_binomial_p_value(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 10
     return float(np.min(p_values))
 
 
-def prepare_fixed_pipeline(portfolio: str = "stress", random_state: int = RANDOM_STATE) -> dict:
-    """Fit RF and all calibrators once on the full in-time sample.
+def prepare_fixed_pipeline(
+    portfolio: str = "stress",
+    random_state: int = RANDOM_STATE,
+    capital_assumptions: IRBAssumptions | None = None,
+) -> dict:
+    """Fit RF and all calibrators once and precompute per-row PD and capital.
 
-    Returns everything needed to run scenarios by resampling and predicting
-    only -- nothing here is refit inside a scenario.
+    Because RF and every calibrator are fixed and score each borrower row
+    independently, a row's calibrated PD -- and its additive IRB capital
+    contribution -- is identical in every scenario. So they are computed once
+    here on the full in-time and OOT samples; a scenario then only indexes the
+    rows its random ~80% subsample selected. Nothing is refit or re-scored
+    inside a scenario. The scenario subsamples are still drawn independently
+    per seed, so each scenario sees a different 80% of the same base.
     """
 
+    assumptions = capital_assumptions or DEFAULT_CAPITAL_ASSUMPTIONS
     df = generate_credit_data(random_state=random_state, portfolio=portfolio)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
 
@@ -96,18 +116,30 @@ def prepare_fixed_pipeline(portfolio: str = "stress", random_state: int = RANDOM
     rf.fit(x_train, y_train)
 
     scores_calib_full = np.clip(rf.predict_proba(x_calib)[:, 1], 1e-6, 1 - 1e-6)
+    scores_test_full = np.clip(rf.predict_proba(x_test)[:, 1], 1e-6, 1 - 1e-6)
 
     calibrators = get_all_calibrators()
-    for calibrator in calibrators.values():
+    pred_calib_full: dict[str, np.ndarray] = {}
+    pred_test_full: dict[str, np.ndarray] = {}
+    capital_rows: dict[str, dict[str, np.ndarray]] = {}
+    for method, calibrator in calibrators.items():
         calibrator.fit(scores_calib_full, y_calib.to_numpy(dtype=float))
+        pred_calib_full[method] = np.asarray(calibrator.predict(scores_calib_full), dtype=float)
+        pred_test = np.asarray(calibrator.predict(scores_test_full), dtype=float)
+        pred_test_full[method] = pred_test
+        row_capital = calculate_irb_capital(pred_test, assumptions=assumptions)
+        capital_rows[method] = {
+            metric: row_capital[col].to_numpy(dtype=float)
+            for metric, col in _CAPITAL_ROW_COLUMNS.items()
+        }
 
     return {
-        "rf": rf,
-        "calibrators": calibrators,
-        "x_calib": x_calib,
-        "y_calib": y_calib,
-        "x_test": x_test,
-        "y_test": y_test,
+        "methods": list(calibrators),
+        "y_calib": y_calib.to_numpy(dtype=float),
+        "y_test": y_test.to_numpy(dtype=float),
+        "pred_calib_full": pred_calib_full,
+        "pred_test_full": pred_test_full,
+        "capital_rows": capital_rows,
     }
 
 
@@ -115,35 +147,28 @@ def run_scenario(
     pipeline: dict,
     scenario_seed: int,
     sample_frac: float = 0.8,
-    capital_assumptions: IRBAssumptions | None = None,
 ) -> pd.DataFrame:
-    """Score one resampled scenario through every fixed calibrator.
+    """Score one resampled scenario by indexing the precomputed per-row values.
 
-    In-time and OOT rows are resampled independently (without replacement)
-    from the same fixed pipeline, so p_value_intime and p_value_oot each
-    reflect sampling variability in their own population.
+    In-time and OOT rows are resampled independently (without replacement) with
+    a seed unique to this scenario, so every scenario is a different ~80% of the
+    same fixed base, and p_value_intime / p_value_oot each reflect sampling
+    variability in their own population.
     """
 
-    assumptions = capital_assumptions or DEFAULT_CAPITAL_ASSUMPTIONS
     rng = np.random.default_rng(scenario_seed)
 
-    x_calib, y_calib = pipeline["x_calib"], pipeline["y_calib"]
-    x_test, y_test = pipeline["x_test"], pipeline["y_test"]
+    y_calib, y_test = pipeline["y_calib"], pipeline["y_test"]
+    idx_calib = rng.choice(len(y_calib), size=int(round(len(y_calib) * sample_frac)), replace=False)
+    idx_test = rng.choice(len(y_test), size=int(round(len(y_test) * sample_frac)), replace=False)
 
-    idx_calib = rng.choice(len(x_calib), size=int(round(len(x_calib) * sample_frac)), replace=False)
-    idx_test = rng.choice(len(x_test), size=int(round(len(x_test) * sample_frac)), replace=False)
-
-    xc, yc = x_calib.iloc[idx_calib], y_calib.iloc[idx_calib].to_numpy(dtype=float)
-    xt, yt = x_test.iloc[idx_test], y_test.iloc[idx_test].to_numpy(dtype=float)
-
-    scores_calib = np.clip(pipeline["rf"].predict_proba(xc)[:, 1], 1e-6, 1 - 1e-6)
-    scores_test = np.clip(pipeline["rf"].predict_proba(xt)[:, 1], 1e-6, 1 - 1e-6)
+    yc, yt = y_calib[idx_calib], y_test[idx_test]
 
     rows = []
-    for method, calibrator in pipeline["calibrators"].items():
-        pred_calib = calibrator.predict(scores_calib)
-        pred_test = calibrator.predict(scores_test)
-        capital = summarize_irb_capital(pred_test, assumptions=assumptions)
+    for method in pipeline["methods"]:
+        pred_calib = pipeline["pred_calib_full"][method][idx_calib]
+        pred_test = pipeline["pred_test_full"][method][idx_test]
+        capital = pipeline["capital_rows"][method]
 
         rows.append(
             {
@@ -152,25 +177,27 @@ def run_scenario(
                 "p_value_intime": min_binomial_p_value(yc, pred_calib),
                 "p_value_oot": min_binomial_p_value(yt, pred_test),
                 "oot_mean_pd": float(np.mean(pred_test)),
-                "expected_loss": capital["total_expected_loss"],
-                "unexpected_loss_capital": capital["total_unexpected_loss_capital"],
-                "rwa": capital["total_rwa"],
-                "required_capital": capital["total_required_capital"],
+                "expected_loss": float(capital["expected_loss"][idx_test].sum()),
+                "unexpected_loss_capital": float(capital["unexpected_loss_capital"][idx_test].sum()),
+                "rwa": float(capital["rwa"][idx_test].sum()),
+                "required_capital": float(capital["required_capital"][idx_test].sum()),
             }
         )
     return pd.DataFrame(rows)
 
 
 def run_monte_carlo(
-    n_scenarios: int = 10,
+    n_scenarios: int = 1000,
     sample_frac: float = 0.8,
     portfolio: str = "stress",
     random_state: int = RANDOM_STATE,
 ) -> pd.DataFrame:
     """Run n_scenarios resampling scenarios; one row per (scenario, method).
 
-    Start with a small n_scenarios (default 10) to validate the pipeline
-    before scaling up to the full 1000-scenario run.
+    Each scenario draws its own independent ~sample_frac subsample from the
+    same fixed base, so results reflect sensitivity to portfolio composition.
+    Per-row PD and capital are precomputed in prepare_fixed_pipeline, so the
+    1000-scenario run stays fast.
     """
 
     pipeline = prepare_fixed_pipeline(portfolio=portfolio, random_state=random_state)
