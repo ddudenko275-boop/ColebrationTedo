@@ -1,9 +1,9 @@
 """Portfolio-resampling stability check for PD calibration methods.
 
-RF and all calibrators are fitted once on the full in-time sample (no
-retraining per scenario). Each Monte Carlo scenario independently resamples a
-fraction of the in-time and OOT populations without replacement and scores
-them through the fixed pipeline:
+The boosting score model and all calibrators are fitted once on the full
+in-time sample (no retraining per scenario). Each Monte Carlo scenario
+independently resamples a fraction of the in-time and OOT populations without
+replacement and scores them through the fixed pipeline:
 
     score -> calibrated PD -> EL / UL / Capital / RWA
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -148,10 +148,11 @@ def prepare_fixed_pipeline(
     random_state: int = RANDOM_STATE,
     capital_assumptions: IRBAssumptions | None = None,
 ) -> dict:
-    """Fit RF and all calibrators once and precompute per-row PD and capital.
+    """Fit the boosting score model and all calibrators once.
 
-    Because RF and every calibrator are fixed and score each borrower row
-    independently, a row's calibrated PD -- and its additive IRB capital
+    Precompute per-row PD and capital. Because the score model and every
+    calibrator are fixed and score each borrower row independently, a row's
+    calibrated PD -- and its additive IRB capital
     contribution -- is identical in every scenario. So they are computed once
     here on the full in-time and OOT samples; a scenario then only indexes the
     rows its random ~80% subsample selected. Nothing is refit or re-scored
@@ -163,17 +164,20 @@ def prepare_fixed_pipeline(
     df = generate_credit_data(random_state=random_state, portfolio=portfolio)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
 
-    rf = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=7,
-        min_samples_leaf=20,
+    score_model = HistGradientBoostingClassifier(
+        max_iter=300,
+        learning_rate=0.04,
+        l2_regularization=0.01,
         random_state=random_state,
-        n_jobs=-1,
     )
-    rf.fit(x_train, y_train)
+    score_model.fit(x_train, y_train)
 
-    scores_calib_full = np.clip(rf.predict_proba(x_calib)[:, 1], 1e-6, 1 - 1e-6)
-    scores_test_full = np.clip(rf.predict_proba(x_test)[:, 1], 1e-6, 1 - 1e-6)
+    scores_calib_full = np.clip(
+        score_model.predict_proba(x_calib)[:, 1], 1e-6, 1 - 1e-6
+    )
+    scores_test_full = np.clip(
+        score_model.predict_proba(x_test)[:, 1], 1e-6, 1 - 1e-6
+    )
 
     representative_pd = _master_scale_representative_pd()
 
@@ -399,7 +403,7 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
     n_scenarios = results["scenario"].nunique()
     print("=" * 100)
     print(f"MONTE CARLO: {n_scenarios} сценариев x {results['method'].nunique()} методов; "
-          "RF и калибраторы зафиксированы, ресемплится только состав портфеля")
+          "бустинг и калибраторы зафиксированы, ресемплится только состав портфеля")
     print("=" * 100)
 
     print("\n--- Сценарный уровень: все строки ---")

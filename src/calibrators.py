@@ -150,7 +150,7 @@ class LogitCalibrator:
     Platt-style logistic calibration.
 
     Модель строит преобразование:
-    raw RF-score -> logit(raw RF-score) -> calibrated PD
+    raw boosting-score -> logit(raw boosting-score) -> calibrated PD
     """
 
     def __init__(self, C: float = 1e6):
@@ -314,7 +314,7 @@ class MonotoneSplineCalibrator:
     Монотонный сплайн.
 
     Логика:
-    RF-score -> бины -> isotonic (взвешенная по n) -> PCHIP.
+    boosting-score -> бины -> isotonic (взвешенная по n) -> PCHIP.
 
     This is a calibration spline with quantile-bin knots, not a regression
     spline that optimizes structural breakpoints. Smoothing is done once, by

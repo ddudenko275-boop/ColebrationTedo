@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -174,12 +174,11 @@ def run_search() -> tuple[pd.DataFrame, pd.DataFrame, int, float]:
     df = generate_credit_data(random_state=RANDOM_STATE, portfolio=portfolio_config.name)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
 
-    base_model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=7,
-        min_samples_leaf=20,
+    base_model = HistGradientBoostingClassifier(
+        max_iter=300,
+        learning_rate=0.04,
+        l2_regularization=0.01,
         random_state=RANDOM_STATE,
-        n_jobs=-1,
     )
     base_model.fit(x_train, y_train)
     scores_calib = np.clip(base_model.predict_proba(x_calib)[:, 1], 1e-6, 1.0 - 1e-6)
