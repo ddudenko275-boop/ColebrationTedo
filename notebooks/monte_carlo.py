@@ -29,6 +29,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from data.generate_data import generate_credit_data, get_oot_split
 from src.calibrators import get_all_calibrators
 from src.capital import IRBAssumptions, calculate_irb_capital
+from src.portfolio import (
+    MASTER_SCALE_RATINGS,
+    assign_pd_master_scale_ratings,
+    master_scale_bounds_table,
+)
 
 RANDOM_STATE = 42
 DEFAULT_CAPITAL_ASSUMPTIONS = IRBAssumptions(lgd=0.40, maturity_years=2.5, ead=1_000_000.0)
@@ -38,52 +43,78 @@ METRIC_COLUMNS = (
     "oot_mean_pd",
     "expected_loss",
     "unexpected_loss_capital",
+    "el_plus_ul",
     "rwa",
-    "required_capital",
 )
+# The cross-method dispersion table (see cross_method_spread) is built on this
+# metric: total economic capital as EL + UL. Note that the old required_capital
+# column is identically equal to unexpected_loss_capital (required_capital =
+# capital_ratio * rwa = capital_ratio * UL / capital_ratio = UL), so it is
+# dropped in favour of EL + UL, which is a genuinely different, richer figure.
+SPREAD_METRIC = "el_plus_ul"
 # Per-row IRB capital columns that are additive over the portfolio, so a
 # subsample total is just the sum of the sampled rows. This is what lets a
 # 1000-scenario run reuse one precomputed per-row table instead of recomputing
-# the IRB formula in every scenario.
+# the IRB formula in every scenario. el_plus_ul is likewise additive (it is a
+# per-row sum of two additive columns), so it is precomputed the same way.
 _CAPITAL_ROW_COLUMNS = {
     "expected_loss": "expected_loss",
     "unexpected_loss_capital": "unexpected_loss_capital",
     "rwa": "rwa",
-    "required_capital": "required_capital",
 }
 
 
-def _quantile_reliability_table(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
-    frame = pd.DataFrame({"y": np.asarray(y_true, dtype=float), "pd": np.asarray(probs, dtype=float)})
-    frame["bin"] = pd.qcut(frame["pd"], q=n_bins, duplicates="drop")
-    return (
-        frame.groupby("bin", observed=True)
-        .agg(
-            n_assets=("y", "size"),
-            defaults=("y", "sum"),
-            mean_pred=("pd", "mean"),
-        )
-        .reset_index(drop=True)
-    )
+def _master_scale_representative_pd() -> np.ndarray:
+    """Representative PD per fixed master-scale grade, in MASTER_SCALE_RATINGS order.
 
-
-def min_binomial_p_value(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 10) -> float:
-    """Smallest per-bin exact binomial p-value across quantile reliability bins.
-
-    Same construction as scripts/spline_parameter_search.py and the notebook's
-    binomial calibration test, so scenario results stay comparable to the
-    single-portfolio numbers already reported.
+    Matches section 8.4 of the calibration notebook, where the binomial test's
+    expected PD per grade is pd_rating = pd_avg_master -- the mentor's fixed
+    representative PD of the bucket -- rather than the mean of the calibrated PDs.
     """
 
-    table = _quantile_reliability_table(y_true, probs, n_bins=n_bins)
-    n = table["n_assets"].to_numpy(dtype=float)
-    defaults = table["defaults"].to_numpy(dtype=float)
-    p = np.clip(table["mean_pred"].to_numpy(dtype=float), 1e-12, 1.0 - 1e-12)
+    scale = master_scale_bounds_table()
+    return scale["pd_avg_master"].to_numpy(dtype=float)
+
+
+def _master_scale_grade_codes(probs: np.ndarray) -> np.ndarray:
+    """Fixed A1...E grade index (0..12) for each calibrated PD.
+
+    Grade assignment (assign_pd_master_scale_ratings) depends only on the PD
+    value through the fixed mentor bounds, so a row's grade is identical in
+    every scenario and can be precomputed once, exactly like its capital.
+    """
+
+    ratings = assign_pd_master_scale_ratings(probs)
+    return np.asarray(ratings.codes, dtype=int)
+
+
+def master_scale_min_binomial_p_value(
+    y_true: np.ndarray,
+    grade_codes: np.ndarray,
+    representative_pd: np.ndarray,
+) -> float:
+    """Smallest per-grade exact binomial p-value on the fixed A1...E master scale.
+
+    Rows are bucketed into fixed master-scale grades and each non-empty grade's
+    observed default count is tested against that grade's representative PD.
+    This is the same test as the master-scale binomial calibration check in
+    section 8.4 of the calibration notebook (min p-value over non-empty
+    buckets), so a scenario's p-value is on the same footing as the
+    single-portfolio number reported there -- and, importantly, the test runs
+    AFTER rating assignment, not on dynamic quantile bins of raw PD.
+    """
+
+    n_grades = len(representative_pd)
+    counts = np.bincount(grade_codes, minlength=n_grades).astype(float)
+    defaults = np.bincount(
+        grade_codes, weights=np.asarray(y_true, dtype=float), minlength=n_grades
+    )
     p_values = [
-        binomtest(int(round(k)), int(round(n_i)), float(p_i)).pvalue
-        for k, n_i, p_i in zip(defaults, n, p)
+        binomtest(int(round(defaults[g])), int(round(counts[g])), float(representative_pd[g])).pvalue
+        for g in range(n_grades)
+        if counts[g] > 0
     ]
-    return float(np.min(p_values))
+    return float(np.min(p_values)) if p_values else float("nan")
 
 
 def prepare_fixed_pipeline(
@@ -118,20 +149,31 @@ def prepare_fixed_pipeline(
     scores_calib_full = np.clip(rf.predict_proba(x_calib)[:, 1], 1e-6, 1 - 1e-6)
     scores_test_full = np.clip(rf.predict_proba(x_test)[:, 1], 1e-6, 1 - 1e-6)
 
+    representative_pd = _master_scale_representative_pd()
+
     calibrators = get_all_calibrators()
     pred_calib_full: dict[str, np.ndarray] = {}
     pred_test_full: dict[str, np.ndarray] = {}
     capital_rows: dict[str, dict[str, np.ndarray]] = {}
+    grade_calib_full: dict[str, np.ndarray] = {}
+    grade_test_full: dict[str, np.ndarray] = {}
     for method, calibrator in calibrators.items():
         calibrator.fit(scores_calib_full, y_calib.to_numpy(dtype=float))
-        pred_calib_full[method] = np.asarray(calibrator.predict(scores_calib_full), dtype=float)
+        pred_calib = np.asarray(calibrator.predict(scores_calib_full), dtype=float)
         pred_test = np.asarray(calibrator.predict(scores_test_full), dtype=float)
+        pred_calib_full[method] = pred_calib
         pred_test_full[method] = pred_test
+        grade_calib_full[method] = _master_scale_grade_codes(pred_calib)
+        grade_test_full[method] = _master_scale_grade_codes(pred_test)
+
         row_capital = calculate_irb_capital(pred_test, assumptions=assumptions)
-        capital_rows[method] = {
+        rows = {
             metric: row_capital[col].to_numpy(dtype=float)
             for metric, col in _CAPITAL_ROW_COLUMNS.items()
         }
+        # Total economic capital per row, additive over the portfolio.
+        rows["el_plus_ul"] = rows["expected_loss"] + rows["unexpected_loss_capital"]
+        capital_rows[method] = rows
 
     return {
         "methods": list(calibrators),
@@ -140,6 +182,9 @@ def prepare_fixed_pipeline(
         "pred_calib_full": pred_calib_full,
         "pred_test_full": pred_test_full,
         "capital_rows": capital_rows,
+        "grade_calib_full": grade_calib_full,
+        "grade_test_full": grade_test_full,
+        "representative_pd": representative_pd,
     }
 
 
@@ -163,24 +208,26 @@ def run_scenario(
     idx_test = rng.choice(len(y_test), size=int(round(len(y_test) * sample_frac)), replace=False)
 
     yc, yt = y_calib[idx_calib], y_test[idx_test]
+    representative_pd = pipeline["representative_pd"]
 
     rows = []
     for method in pipeline["methods"]:
-        pred_calib = pipeline["pred_calib_full"][method][idx_calib]
         pred_test = pipeline["pred_test_full"][method][idx_test]
+        grade_calib = pipeline["grade_calib_full"][method][idx_calib]
+        grade_test = pipeline["grade_test_full"][method][idx_test]
         capital = pipeline["capital_rows"][method]
 
         rows.append(
             {
                 "scenario": scenario_seed,
                 "method": method,
-                "p_value_intime": min_binomial_p_value(yc, pred_calib),
-                "p_value_oot": min_binomial_p_value(yt, pred_test),
+                "p_value_intime": master_scale_min_binomial_p_value(yc, grade_calib, representative_pd),
+                "p_value_oot": master_scale_min_binomial_p_value(yt, grade_test, representative_pd),
                 "oot_mean_pd": float(np.mean(pred_test)),
                 "expected_loss": float(capital["expected_loss"][idx_test].sum()),
                 "unexpected_loss_capital": float(capital["unexpected_loss_capital"][idx_test].sum()),
+                "el_plus_ul": float(capital["el_plus_ul"][idx_test].sum()),
                 "rwa": float(capital["rwa"][idx_test].sum()),
-                "required_capital": float(capital["required_capital"][idx_test].sum()),
             }
         )
     return pd.DataFrame(rows)
@@ -218,6 +265,78 @@ def summarize_monte_carlo(results: pd.DataFrame) -> pd.DataFrame:
     return agg.reset_index()
 
 
+def cross_method_spread(results: pd.DataFrame, metric: str = SPREAD_METRIC) -> pd.DataFrame:
+    """Per-scenario dispersion of a metric ACROSS methods (not across scenarios).
+
+    summarize_monte_carlo measures how one method moves over 1000 scenarios.
+    This is the orthogonal cut the analysis asks for: within a single scenario
+    (one fixed ~80% subsample, all 5 methods scoring the same borrowers), how
+    far apart are the methods? For each scenario it reports the cheapest and the
+    most expensive method by ``metric`` (EL + UL by default), the absolute
+    difference (max - min) and the relative difference expressed against the
+    minimum method -- i.e. how much more capital the most conservative method
+    demands than the leanest one.
+
+    One row per scenario (the transposed orientation), so the table stays a
+    tidy 1000-row frame that sorts and exports cleanly to CSV.
+    """
+
+    grouped = results.groupby("scenario")[["method", metric]]
+    rows = []
+    for scenario, frame in grouped:
+        values = frame.set_index("method")[metric]
+        min_method = values.idxmin()
+        max_method = values.idxmax()
+        min_value = float(values.loc[min_method])
+        max_value = float(values.loc[max_method])
+        abs_diff = max_value - min_value
+        rel_diff = abs_diff / min_value if min_value != 0.0 else float("nan")
+        rows.append(
+            {
+                "scenario": int(scenario),
+                "min_method": min_method,
+                "max_method": max_method,
+                f"min_{metric}": min_value,
+                f"max_{metric}": max_value,
+                "abs_diff": abs_diff,
+                "rel_diff": rel_diff,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("scenario").reset_index(drop=True)
+
+
+def summarize_cross_method_spread(spread: pd.DataFrame, metric: str = SPREAD_METRIC) -> pd.DataFrame:
+    """Compact summary of the per-scenario cross-method spread over all scenarios.
+
+    Reports mean / median / min / max of both the absolute and the relative
+    difference, plus how often each method is the cheapest and the most
+    expensive across scenarios, so the 1000-row table has a one-glance takeaway.
+    """
+
+    stat_rows = []
+    for label, col in (("abs_diff", "abs_diff"), ("rel_diff", "rel_diff")):
+        series = spread[col]
+        stat_rows.append(
+            {
+                "quantity": label,
+                "mean": float(series.mean()),
+                "median": float(series.median()),
+                "min": float(series.min()),
+                "max": float(series.max()),
+            }
+        )
+    stats = pd.DataFrame(stat_rows)
+
+    counts = pd.DataFrame(
+        {
+            "times_cheapest": spread["min_method"].value_counts(),
+            "times_most_expensive": spread["max_method"].value_counts(),
+        }
+    ).fillna(0.0).astype(int)
+    counts.index.name = "method"
+    return stats, counts.reset_index()
+
+
 def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> None:
     """Print scenario-level rows and a per-metric summary in readable blocks.
 
@@ -237,17 +356,17 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
         "oot_mean_pd": fmt_pct,
         "expected_loss": fmt_bln,
         "unexpected_loss_capital": fmt_bln,
+        "el_plus_ul": fmt_bln,
         "rwa": fmt_bln,
-        "required_capital": fmt_bln,
     }
     metric_titles = {
-        "p_value_intime": "Min binomial p-value, IN-TIME (доля единицы)",
-        "p_value_oot": "Min binomial p-value, OOT (доля единицы)",
+        "p_value_intime": "Min binomial p-value (master scale A1...E), IN-TIME",
+        "p_value_oot": "Min binomial p-value (master scale A1...E), OOT",
         "oot_mean_pd": "Средний PD на OOT",
         "expected_loss": "Expected Loss, млрд",
         "unexpected_loss_capital": "UL capital, млрд",
+        "el_plus_ul": "EL + UL (экономический капитал), млрд",
         "rwa": "RWA, млрд",
-        "required_capital": "Required capital, млрд",
     }
 
     n_scenarios = results["scenario"].nunique()
@@ -272,10 +391,30 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
         print(f"\n{metric_titles[metric]}:")
         print(block.to_string(index=False))
 
+    spread = cross_method_spread(results)
+    spread_stats, spread_counts = summarize_cross_method_spread(spread)
+    print("\n--- Межметодный разброс EL + UL внутри сценария (по всем сценариям) ---")
+    print("На каждый сценарий: самый дешёвый и самый дорогой по EL+UL метод, abs = max-min,")
+    print("rel = (max-min) / min (относительно минимального метода).")
+    stat_cols = ("mean", "median", "min", "max")
+    row_fmt = {"abs_diff": fmt_bln, "rel_diff": "{:.4%}".format}
+    stats_view = spread_stats.copy()
+    for col in stat_cols:
+        stats_view[col] = [
+            row_fmt[q](v) for q, v in zip(spread_stats["quantity"], spread_stats[col])
+        ]
+    stats_view["quantity"] = stats_view["quantity"].map(
+        {"abs_diff": "abs (max-min), млрд", "rel_diff": "rel (max-min)/min"}
+    )
+    print(stats_view.to_string(index=False))
+    print("\nКак часто метод оказывался самым дешёвым / самым дорогим по капиталу:")
+    print(spread_counts.to_string(index=False))
+
     print("\nКак читать: узкий range у oot_mean_pd и денежных метрик = результат устойчив к составу")
     print("портфеля. Широкий range у p-value ожидаем (min binomial p-value чувствителен к случайному")
-    print("числу дефолтов в отдельном бине); структурный сигнал — это p_value_oot_max около нуля,")
-    print("то есть тест значим на ВСЕХ сценариях, а не в среднем.")
+    print("числу дефолтов в отдельном грейде мастер-шкалы); структурный сигнал — это p_value_oot_max")
+    print("около нуля, то есть тест значим на ВСЕХ сценариях, а не в среднем. Межметодный rel показывает,")
+    print("на сколько процентов самый консервативный метод дороже самого экономного при том же портфеле.")
 
 
 if __name__ == "__main__":
