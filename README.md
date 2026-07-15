@@ -5,7 +5,7 @@
 ## Что внутри
 
 - `notebooks/pd_calibration.ipynb` - основной исследовательский notebook.
-- `notebooks/monte_carlo.ipynb` - Monte Carlo проверка устойчивости калибровок к составу портфеля: таблицы p-value (мастер-шкала A1…E, как раздел 8.4) / PD / EL / UL / EL+UL / RWA по сценариям, сводка mean/min/max/range и межметодный разброс EL+UL внутри сценария.
+- `notebooks/monte_carlo.ipynb` - Monte Carlo проверка устойчивости калибровок к составу портфеля: whole-model тест калибровки (само-калибровка) / PD / EL / UL / EL+UL / RWA по сценариям, сводка mean/min/max/range, межметодный разброс EL+UL внутри сценария и диагностика по грейдам мастер-шкалы.
 - `notebooks/monte_carlo.py` - вычислительный движок Monte Carlo (ресемплинг ~80% без переобучения модели), используется ноутбуком выше.
 - `src/calibrators.py` - методы калибровки PD: logit/Platt, isotonic, beta, spline.
 - `src/metrics.py` - метрики калибровки, дискриминации и стабильности.
