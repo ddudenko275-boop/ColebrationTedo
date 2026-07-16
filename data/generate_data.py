@@ -48,11 +48,11 @@ DEFAULT_PORTFOLIO_CONFIGS = {
         name="stress",
         rating_pd_bounds=PORTFOLIO_RATING_PD_BOUNDS,
         rating_mix={
-            "A": 0.03,
-            "B": 0.36,
-            "C": 0.41,
-            "D": 0.16,
-            "E": 0.04,
+            "A": 0.30,
+            "B": 0.35,
+            "C": 0.20,
+            "D": 0.10,
+            "E": 0.05,
         },
         oot_pd_lift=0.08,
         pandemic_pd_lift=0.05,
@@ -182,6 +182,17 @@ RATING_FEATURE_PROFILES = {
 }
 
 
+RATING_RISK_SUBBAND_MIX = {
+    # Three equal true-PD subbands inside each source rating.  The weights are
+    # shaped as a smooth bell over the detailed A1..D3 structure while keeping
+    # the requested coarse mix A=30%, B=35%, C=20%, D=10%, E=5%.
+    "A": (0.20, 0.35, 0.45),
+    "B": (0.40, 0.35, 0.25),
+    "C": (0.40, 0.35, 0.25),
+    "D": (0.45, 0.35, 0.20),
+}
+
+
 def _logit(values: np.ndarray) -> np.ndarray:
     values = np.clip(values, 1e-6, 1.0 - 1e-6)
     return np.log(values / (1.0 - values))
@@ -197,14 +208,14 @@ def _draw_pd_inside_rating(
     config = get_rating_portfolio_config(portfolio)
     lower, upper, _ = (config.rating_pd_bounds or {})[rating]
 
-    if rating in {"A", "B", "C"}:
-        risk_intensity = rng.beta(1.05, 1.05, size)
-    elif rating == "D":
-        risk_intensity = rng.beta(0.90, 1.45, size)
+    if rating in RATING_RISK_SUBBAND_MIX:
+        subband_weights = np.asarray(RATING_RISK_SUBBAND_MIX[rating], dtype=float)
+        subband_weights = subband_weights / subband_weights.sum()
+        subband = rng.choice(len(subband_weights), size=size, p=subband_weights)
+        within_subband = rng.beta(2.5, 2.5, size)
+        risk_intensity = (subband + within_subband) / len(subband_weights)
     elif rating == "E":
-        tail_mask = rng.random(size) < 0.18
-        risk_intensity = rng.beta(0.85, 2.00, size)
-        risk_intensity[tail_mask] = rng.random(int(tail_mask.sum()))
+        risk_intensity = rng.beta(2.0, 3.0, size)
     else:
         risk_intensity = rng.random(size)
 
@@ -231,7 +242,8 @@ def generate_credit_data(
     random_state:
         Reproducibility seed.
     portfolio:
-        ``"stress"`` creates a high-risk portfolio concentrated in B-C ratings.
+        ``"stress"`` creates the project portfolio with the configured A-E mix
+        and bell-shaped detailed PD bands.
         ``"normal"`` creates a lower-risk portfolio closer to a typical performing
         retail/SME book.
     """

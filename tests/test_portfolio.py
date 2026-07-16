@@ -54,7 +54,9 @@ def test_generated_portfolio_uses_five_year_a_to_e_rating_structure():
     assert sorted(df["origination_year"].unique()) == [2020, 2021, 2022, 2023, 2024]
     rating_share = df["rating"].value_counts(normalize=True)
     assert set(rating_share.index) == {"A", "B", "C", "D", "E"}
-    assert rating_share[["B", "C"]].sum() > 0.70
+    expected_mix = {"A": 0.30, "B": 0.35, "C": 0.20, "D": 0.10, "E": 0.05}
+    for rating, expected_share in expected_mix.items():
+        assert rating_share[rating] == pytest.approx(expected_share, abs=0.015)
     assert (df.groupby("rating")["true_pd"].min() >= 0.0).all()
 
 
