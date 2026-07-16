@@ -339,10 +339,10 @@ def get_oot_split(df: pd.DataFrame, target_col: str = "default"):
     """Split a portfolio into one in-time modelling sample and an OOT test.
 
     The latest origination year is reserved for the OOT test. All earlier years
-    are returned both as the RF training sample and as the calibrator fitting
-    sample. This mirrors the methodology used in the notebook: estimate the base
-    RF and the post-calibration mapping on the same historical in-time period,
-    then evaluate only once on the future OOT portfolio.
+    are returned as one shared historical train/calibration period. Downstream
+    code uses cross-fitted out-of-fold boosting scores inside this period for
+    calibrator fitting, then fits one final boosting model on the full
+    historical period for future OOT scoring.
     """
 
     feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUDE_COLUMNS | {target_col}]

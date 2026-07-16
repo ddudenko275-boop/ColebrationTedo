@@ -27,7 +27,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
-from sklearn.ensemble import HistGradientBoostingClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -37,6 +36,7 @@ from data.generate_data import generate_credit_data, get_oot_split, get_rating_p
 from src.calibrators import FrenchSplineCalibrator, LogitCalibrator, MonotoneSplineCalibrator
 from src.capital import IRBAssumptions, compare_irb_capital_by_method
 from src.metrics import summary_metrics
+from src.score_model import fit_oof_score_model
 
 
 RANDOM_STATE = 42
@@ -174,15 +174,12 @@ def run_search() -> tuple[pd.DataFrame, pd.DataFrame, int, float]:
     df = generate_credit_data(random_state=RANDOM_STATE, portfolio=portfolio_config.name)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
 
-    base_model = HistGradientBoostingClassifier(
-        max_iter=300,
-        learning_rate=0.04,
-        l2_regularization=0.01,
+    _, scores_calib, scores_test, _ = fit_oof_score_model(
+        x_train,
+        y_train,
+        x_test,
         random_state=RANDOM_STATE,
     )
-    base_model.fit(x_train, y_train)
-    scores_calib = np.clip(base_model.predict_proba(x_calib)[:, 1], 1e-6, 1.0 - 1e-6)
-    scores_test = np.clip(base_model.predict_proba(x_test)[:, 1], 1e-6, 1.0 - 1e-6)
 
     y_calib_arr = y_calib.to_numpy(dtype=float)
     y_test_arr = y_test.to_numpy(dtype=float)

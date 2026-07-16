@@ -1,9 +1,11 @@
 """Portfolio-resampling stability check for PD calibration methods.
 
-The boosting score model and all calibrators are fitted once on the full
-in-time sample (no retraining per scenario). Each Monte Carlo scenario
-independently resamples a fraction of the in-time and OOT populations without
-replacement and scores them through the fixed pipeline:
+The boosting score model is cross-fitted on the in-time period to produce
+out-of-fold calibration scores.  Calibrators are fitted once on those OOF
+scores, and a final boosting model is fitted on the full in-time period for OOT
+scoring. Each Monte Carlo scenario independently resamples a fraction of the
+in-time and OOT populations without replacement and scores them through the
+fixed pipeline:
 
     score -> calibrated PD -> EL / UL / Capital / RWA
 
@@ -20,7 +22,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
-from sklearn.ensemble import HistGradientBoostingClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -34,6 +35,7 @@ from src.portfolio import (
     assign_pd_master_scale_ratings,
     master_scale_bounds_table,
 )
+from src.score_model import fit_oof_score_model
 
 RANDOM_STATE = 42
 DEFAULT_CAPITAL_ASSUMPTIONS = IRBAssumptions(lgd=0.40, maturity_years=2.5, ead=1_000_000.0)
@@ -148,11 +150,12 @@ def prepare_fixed_pipeline(
     random_state: int = RANDOM_STATE,
     capital_assumptions: IRBAssumptions | None = None,
 ) -> dict:
-    """Fit the boosting score model and all calibrators once.
+    """Fit the OOF boosting score pipeline and all calibrators once.
 
-    Precompute per-row PD and capital. Because the score model and every
-    calibrator are fixed and score each borrower row independently, a row's
-    calibrated PD -- and its additive IRB capital
+    Precompute per-row PD and capital. Calibration-period scores are
+    out-of-fold, while OOT scores come from the final model fitted on the full
+    in-time period. Because the score pipeline and every calibrator are fixed
+    for the Monte Carlo run, a row's calibrated PD -- and its additive IRB capital
     contribution -- is identical in every scenario. So they are computed once
     here on the full in-time and OOT samples; a scenario then only indexes the
     rows its random ~80% subsample selected. Nothing is refit or re-scored
@@ -164,19 +167,11 @@ def prepare_fixed_pipeline(
     df = generate_credit_data(random_state=random_state, portfolio=portfolio)
     x_train, x_calib, x_test, y_train, y_calib, y_test = get_oot_split(df)
 
-    score_model = HistGradientBoostingClassifier(
-        max_iter=300,
-        learning_rate=0.04,
-        l2_regularization=0.01,
+    _, scores_calib_full, scores_test_full, _ = fit_oof_score_model(
+        x_train,
+        y_train,
+        x_test,
         random_state=random_state,
-    )
-    score_model.fit(x_train, y_train)
-
-    scores_calib_full = np.clip(
-        score_model.predict_proba(x_calib)[:, 1], 1e-6, 1 - 1e-6
-    )
-    scores_test_full = np.clip(
-        score_model.predict_proba(x_test)[:, 1], 1e-6, 1 - 1e-6
     )
 
     representative_pd = _master_scale_representative_pd()

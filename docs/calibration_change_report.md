@@ -193,10 +193,10 @@ FrenchSplineCalibrator(n_bins=30, alpha=20.0, shrinkage=0.6)
 
 Считаются два теста:
 
-- IN-TIME / fit sample 2020-2023;
+- IN-TIME / OOF fit sample 2020-2023;
 - OOT / validation sample 2024.
 
-Выводы делаются по OOT, а IN-TIME оставлен как fit-check.
+Выводы делаются по OOT, а IN-TIME оставлен как OOF fit-check.
 
 ### 3. Добавлена диагностика binning ties
 
