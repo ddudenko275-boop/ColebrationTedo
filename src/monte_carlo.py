@@ -90,20 +90,19 @@ def _master_scale_grade_codes(probs: np.ndarray) -> np.ndarray:
     return np.asarray(ratings.codes, dtype=int)
 
 
-def master_scale_min_binomial_p_value(
+def master_scale_grade_binomial_table(
     y_true: np.ndarray,
     grade_codes: np.ndarray,
     representative_pd: np.ndarray,
-) -> float:
-    """Smallest per-grade exact binomial p-value on the fixed A1...E master scale.
+) -> pd.DataFrame:
+    """Per-grade master-scale binomial test, Holm-corrected, one row per grade.
 
-    Rows are bucketed into fixed master-scale grades and each non-empty grade's
-    observed default count is tested against that grade's representative PD.
-    This is the same test as the master-scale binomial calibration check in
-    section 8.4 of the calibration notebook (min p-value over non-empty
-    buckets), so a scenario's p-value is on the same footing as the
-    single-portfolio number reported there -- and, importantly, the test runs
-    AFTER rating assignment, not on dynamic quantile bins of raw PD.
+    The section 8.4 view, but reporting WHICH grades deviate instead of only the
+    minimum p-value. Each non-empty fixed grade's observed default count is
+    tested against that grade's representative PD, and the p-values are
+    Holm-corrected over the grades actually tested: the raw minimum over ~13
+    grades is not a 5% test, since under a perfect model it drops below 0.05
+    about half the time.
     """
 
     n_grades = len(representative_pd)
@@ -111,12 +110,57 @@ def master_scale_min_binomial_p_value(
     defaults = np.bincount(
         grade_codes, weights=np.asarray(y_true, dtype=float), minlength=n_grades
     )
-    p_values = [
-        binomtest(int(round(defaults[g])), int(round(counts[g])), float(representative_pd[g])).pvalue
-        for g in range(n_grades)
-        if counts[g] > 0
-    ]
-    return float(np.min(p_values)) if p_values else float("nan")
+    tested = [g for g in range(n_grades) if counts[g] > 0]
+    p_raw = {
+        g: binomtest(
+            int(round(defaults[g])), int(round(counts[g])), float(representative_pd[g])
+        ).pvalue
+        for g in tested
+    }
+
+    # Holm: sort ascending, scale the i-th smallest by (k - i), enforce monotonicity.
+    holm: dict[int, float] = {}
+    running = 0.0
+    k = len(tested)
+    for rank, (g, p) in enumerate(sorted(p_raw.items(), key=lambda kv: kv[1])):
+        running = max(running, min(1.0, p * (k - rank)))
+        holm[g] = running
+
+    return pd.DataFrame(
+        {
+            "grade": [MASTER_SCALE_RATINGS[g] for g in tested],
+            "n_assets": [int(counts[g]) for g in tested],
+            "defaults": [int(round(defaults[g])) for g in tested],
+            "observed_default_rate": [defaults[g] / counts[g] for g in tested],
+            "master_scale_pd": [float(representative_pd[g]) for g in tested],
+            "p_value": [p_raw[g] for g in tested],
+            "p_value_holm": [holm[g] for g in tested],
+            "significant_5pct": [holm[g] < 0.05 for g in tested],
+            "direction": [
+                "underprediction"
+                if defaults[g] / counts[g] > representative_pd[g]
+                else "overprediction"
+                for g in tested
+            ],
+        }
+    )
+
+
+def master_scale_grade_binomial_p_value(
+    y_true: np.ndarray,
+    grade_codes: np.ndarray,
+    representative_pd: np.ndarray,
+) -> float:
+    """Holm-corrected smallest per-grade p-value on the fixed A1...E master scale.
+
+    Secondary diagnostic, not the headline calibration test: a grade is defined by
+    PREDICTED PD, so the bucket mixes borrowers of different true risk and its
+    default rate is pulled toward the portfolio mean rather than the bucket's
+    representative PD. The whole-sample test is whole_model_binomial_p_value.
+    """
+
+    table = master_scale_grade_binomial_table(y_true, grade_codes, representative_pd)
+    return float(table["p_value_holm"].min()) if len(table) else float("nan")
 
 
 def whole_model_binomial_p_value(y_true: np.ndarray, predicted_pd: np.ndarray) -> float:
@@ -130,9 +174,10 @@ def whole_model_binomial_p_value(y_true: np.ndarray, predicted_pd: np.ndarray) -
 
     It deliberately does NOT reuse the fixed mentor master scale as the expected
     PD: that scale sets grade E at 40% while this portfolio's E bucket realises
-    ~48%, so a per-grade test against the fixed scale penalises every method for
-    a scale/portfolio mismatch rather than a model defect. The per-grade
-    master-scale view is kept only as a diagnostic (see notebook section 3c).
+    ~47%, so a per-grade test against the fixed scale penalises every method for
+    a scale/portfolio mismatch rather than a model defect. That per-grade view is
+    kept as a secondary diagnostic -- see master_scale_grade_binomial_table,
+    which reports which grades deviate and Holm-corrects for testing ~13 of them.
     """
 
     y = np.asarray(y_true, dtype=float)
@@ -244,9 +289,10 @@ def run_scenario(
             {
                 "scenario": scenario_seed,
                 "method": method,
-                # Whole-model self-calibration test (portfolio-level binomial vs
-                # the model's own predicted PDs), not the per-grade master-scale
-                # test -- see whole_model_binomial_p_value.
+                # Whole-sample (whole-model) self-calibration test: total observed
+                # defaults against the total the model's own PDs expect. The
+                # per-grade master-scale test of section 8.4 is a separate,
+                # secondary cut -- see master_scale_grade_binomial_p_value.
                 "p_value_intime": whole_model_binomial_p_value(yc, pred_calib),
                 "p_value_oot": whole_model_binomial_p_value(yt, pred_test),
                 "oot_mean_pd": float(np.mean(pred_test)),
