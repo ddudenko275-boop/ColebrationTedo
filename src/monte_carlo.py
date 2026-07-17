@@ -10,8 +10,16 @@ fixed pipeline:
     score -> calibrated PD -> EL / UL / Capital / RWA
 
 This isolates sensitivity to portfolio composition from sensitivity to model
-fitting. See docs/calibration_change_report.md for the underlying calibrator
-fix this check is meant to stress-test.
+fitting. Note the flip side: every scenario resamples ONE base portfolio, so a
+quirk of that portfolio's realised defaults is inherited by all scenarios. The
+spread across scenarios therefore measures composition sensitivity, not how
+often the calibration would pass on a freshly drawn portfolio.
+
+Two calibration tests are reported per scenario: the whole-model
+self-calibration binomial test (primary) and the per-grade test against the
+fixed master scale, Holm-corrected for multiple testing (secondary diagnostic).
+See docs/calibration_change_report.md for the underlying calibrator fix this
+check is meant to stress-test.
 """
 
 from __future__ import annotations
@@ -42,6 +50,8 @@ DEFAULT_CAPITAL_ASSUMPTIONS = IRBAssumptions(lgd=0.40, maturity_years=2.5, ead=1
 METRIC_COLUMNS = (
     "p_value_intime",
     "p_value_oot",
+    "p_value_grade_intime",
+    "p_value_grade_oot",
     "oot_mean_pd",
     "expected_loss",
     "unexpected_loss_capital",
@@ -90,20 +100,33 @@ def _master_scale_grade_codes(probs: np.ndarray) -> np.ndarray:
     return np.asarray(ratings.codes, dtype=int)
 
 
-def master_scale_min_binomial_p_value(
+def master_scale_grade_binomial_p_value(
     y_true: np.ndarray,
     grade_codes: np.ndarray,
     representative_pd: np.ndarray,
 ) -> float:
-    """Smallest per-grade exact binomial p-value on the fixed A1...E master scale.
+    """Family-wise per-grade binomial p-value on the fixed A1...E master scale.
 
     Rows are bucketed into fixed master-scale grades and each non-empty grade's
-    observed default count is tested against that grade's representative PD.
-    This is the same test as the master-scale binomial calibration check in
-    section 8.4 of the calibration notebook (min p-value over non-empty
-    buckets), so a scenario's p-value is on the same footing as the
-    single-portfolio number reported there -- and, importantly, the test runs
-    AFTER rating assignment, not on dynamic quantile bins of raw PD.
+    observed default count is tested against that grade's representative PD. The
+    test runs AFTER rating assignment, not on dynamic quantile bins of raw PD.
+
+    The returned value is the smallest per-grade p-value CORRECTED for multiple
+    testing (Holm, which for the minimum reduces to Bonferroni: p_min * number
+    of grades actually tested). The raw minimum must not be compared against
+    0.05: taking a minimum over ~13 grades makes small p-values likely even when
+    every grade is perfectly calibrated -- under a perfect model P(min p < 0.05)
+    is about 49%, so the uncorrected statistic rejects a good model roughly half
+    the time. Correcting here means the caller can compare the result against a
+    plain 0.05 like any other p-value.
+
+    Note this stays a secondary diagnostic. Even corrected, it tends to reject
+    in-time, because a grade is defined by PREDICTED PD: a bucket mixes
+    borrowers of different true risk, whose realised default rate pulls toward
+    the portfolio mean rather than the bucket's representative PD (regression to
+    the mean). That is a property of bucketing an imperfect ranking, not
+    evidence of miscalibration. The primary calibration test is
+    whole_model_binomial_p_value.
     """
 
     n_grades = len(representative_pd)
@@ -116,7 +139,9 @@ def master_scale_min_binomial_p_value(
         for g in range(n_grades)
         if counts[g] > 0
     ]
-    return float(np.min(p_values)) if p_values else float("nan")
+    if not p_values:
+        return float("nan")
+    return float(min(1.0, min(p_values) * len(p_values)))
 
 
 def whole_model_binomial_p_value(y_true: np.ndarray, predicted_pd: np.ndarray) -> float:
@@ -129,10 +154,15 @@ def whole_model_binomial_p_value(y_true: np.ndarray, predicted_pd: np.ndarray) -
     OOT it flags only a genuine portfolio-level level miss.
 
     It deliberately does NOT reuse the fixed mentor master scale as the expected
-    PD: that scale sets grade E at 40% while this portfolio's E bucket realises
-    ~48%, so a per-grade test against the fixed scale penalises every method for
-    a scale/portfolio mismatch rather than a model defect. The per-grade
-    master-scale view is kept only as a diagnostic (see notebook section 3c).
+    PD. That keeps the test about the model: the per-grade view answers a
+    different question and is harsher for reasons unrelated to calibration (see
+    master_scale_grade_binomial_p_value), so it is kept only as a diagnostic.
+
+    Read one p-value with care, especially on OOT. It compares predictions
+    against a single year's REALISED defaults, which scatter around their own
+    generating PD, so a correct calibration still fails on an unlucky draw --
+    and the p-value alone cannot tell that apart from a real miss. See
+    independent_portfolio_check, which separates the two.
     """
 
     y = np.asarray(y_true, dtype=float)
@@ -234,21 +264,33 @@ def run_scenario(
 
     yc, yt = y_calib[idx_calib], y_test[idx_test]
 
+    representative_pd = pipeline["representative_pd"]
     rows = []
     for method in pipeline["methods"]:
         pred_calib = pipeline["pred_calib_full"][method][idx_calib]
         pred_test = pipeline["pred_test_full"][method][idx_test]
         capital = pipeline["capital_rows"][method]
+        grade_calib = pipeline["grade_calib_full"][method][idx_calib]
+        grade_test = pipeline["grade_test_full"][method][idx_test]
 
         rows.append(
             {
                 "scenario": scenario_seed,
                 "method": method,
-                # Whole-model self-calibration test (portfolio-level binomial vs
-                # the model's own predicted PDs), not the per-grade master-scale
-                # test -- see whole_model_binomial_p_value.
+                # Primary test: whole-model self-calibration (portfolio-level
+                # binomial vs the model's own predicted PDs).
                 "p_value_intime": whole_model_binomial_p_value(yc, pred_calib),
                 "p_value_oot": whole_model_binomial_p_value(yt, pred_test),
+                # Secondary diagnostic: per-grade test against the fixed master
+                # scale, corrected for multiple testing. Expected to be harsher
+                # than the whole-model test by construction -- see
+                # master_scale_grade_binomial_p_value.
+                "p_value_grade_intime": master_scale_grade_binomial_p_value(
+                    yc, grade_calib, representative_pd
+                ),
+                "p_value_grade_oot": master_scale_grade_binomial_p_value(
+                    yt, grade_test, representative_pd
+                ),
                 "oot_mean_pd": float(np.mean(pred_test)),
                 "expected_loss": float(capital["expected_loss"][idx_test].sum()),
                 "unexpected_loss_capital": float(capital["unexpected_loss_capital"][idx_test].sum()),
@@ -257,6 +299,91 @@ def run_scenario(
             }
         )
     return pd.DataFrame(rows)
+
+
+DEFAULT_CHECK_SEEDS = (7, 42, 101, 202, 303, 404, 505, 606, 707, 808, 909, 1010)
+
+
+def independent_portfolio_check(
+    seeds: tuple[int, ...] = DEFAULT_CHECK_SEEDS,
+    portfolio: str = "stress",
+) -> pd.DataFrame:
+    """Refit the whole pipeline on FRESHLY GENERATED portfolios, one per seed.
+
+    This answers a question the Monte Carlo cannot. The Monte Carlo resamples a
+    single base portfolio, so every scenario inherits whatever that portfolio's
+    defaults happened to do; if its OOT year drew an unlucky realisation, all
+    1000 scenarios inherit the miss and the pass rate says more about that one
+    draw than about the calibration. Here each seed is an independent portfolio,
+    scored end to end (generate -> OOF boosting -> calibrate -> test).
+
+    Besides the p-values it returns the decomposition that separates the two
+    things a binomial test conflates:
+
+    - ``pred_over_true``: mean predicted PD / mean TRUE PD on OOT. This is the
+      only column that measures the CALIBRATION, since true_pd is the quantity
+      the model is trying to recover. It is observable only because the
+      portfolio is synthetic.
+    - ``obs_over_true``: realised default rate / mean TRUE PD on OOT, i.e. how
+      far that year's coin flips landed from their own generating PD. Pure
+      sampling noise, nothing to do with the model.
+    - ``pred_over_obs``: what the binomial test actually compares, and the
+      product of the two effects above.
+
+    A calibration can be exactly right (pred_over_true ~ 1) and still fail the
+    OOT test on a given seed, because obs_over_true drifted. Reporting only the
+    p-value hides which of the two happened.
+    """
+
+    calibrator_names = list(get_all_calibrators())
+    rows = []
+    for seed in seeds:
+        df = generate_credit_data(random_state=seed, portfolio=portfolio)
+        x_train, _, x_test, y_train, _, y_test = get_oot_split(df)
+        _, scores_calib, scores_test, _ = fit_oof_score_model(
+            x_train, y_train, x_test, random_state=seed
+        )
+        yc = y_train.to_numpy(dtype=float)
+        yt = y_test.to_numpy(dtype=float)
+        oot_true_pd = float(df.loc[df["origination_year"] == df["origination_year"].max(), "true_pd"].mean())
+
+        for method in calibrator_names:
+            calibrator = get_all_calibrators()[method]
+            calibrator.fit(scores_calib, yc)
+            pred_calib = np.asarray(calibrator.predict(scores_calib), dtype=float)
+            pred_test = np.asarray(calibrator.predict(scores_test), dtype=float)
+            rows.append(
+                {
+                    "seed": seed,
+                    "method": method,
+                    "p_value_intime": whole_model_binomial_p_value(yc, pred_calib),
+                    "p_value_oot": whole_model_binomial_p_value(yt, pred_test),
+                    "oot_true_pd": oot_true_pd,
+                    "oot_obs_dr": float(yt.mean()),
+                    "oot_pred_pd": float(pred_test.mean()),
+                    "pred_over_true": float(pred_test.mean()) / oot_true_pd,
+                    "obs_over_true": float(yt.mean()) / oot_true_pd,
+                    "pred_over_obs": float(pred_test.mean()) / float(yt.mean()),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def summarize_independent_portfolio_check(check: pd.DataFrame) -> pd.DataFrame:
+    """Per-method pass rates and bias decomposition over independent portfolios."""
+
+    return (
+        check.groupby("method")
+        .agg(
+            share_pass_intime=("p_value_intime", lambda s: float((s >= 0.05).mean())),
+            share_pass_oot=("p_value_oot", lambda s: float((s >= 0.05).mean())),
+            median_p_oot=("p_value_oot", "median"),
+            pred_over_true=("pred_over_true", "mean"),
+            obs_over_true=("obs_over_true", "mean"),
+            pred_over_obs=("pred_over_obs", "mean"),
+        )
+        .reset_index()
+    )
 
 
 def run_monte_carlo(
@@ -379,6 +506,8 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
     metric_formats = {
         "p_value_intime": "{:.6f}".format,
         "p_value_oot": "{:.6f}".format,
+        "p_value_grade_intime": "{:.6f}".format,
+        "p_value_grade_oot": "{:.6f}".format,
         "oot_mean_pd": fmt_pct,
         "expected_loss": fmt_bln,
         "unexpected_loss_capital": fmt_bln,
@@ -388,6 +517,8 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
     metric_titles = {
         "p_value_intime": "Whole-model binomial p-value (self-calibration), IN-TIME",
         "p_value_oot": "Whole-model binomial p-value (self-calibration), OOT",
+        "p_value_grade_intime": "По-грейдовый p-value vs мастер-шкала (Holm), IN-TIME",
+        "p_value_grade_oot": "По-грейдовый p-value vs мастер-шкала (Holm), OOT",
         "oot_mean_pd": "Средний PD на OOT",
         "expected_loss": "Expected Loss, млрд",
         "unexpected_loss_capital": "UL capital, млрд",
@@ -437,9 +568,14 @@ def print_monte_carlo_report(results: pd.DataFrame, summary: pd.DataFrame) -> No
     print(spread_counts.to_string(index=False))
 
     print("\nКак читать: узкий range у oot_mean_pd и денежных метрик = результат устойчив к составу")
-    print("портфеля. p-value здесь — whole-model тест само-калибровки (факт дефолтов против суммы")
-    print("предсказанных PD модели); у корректно построенной модели он проходит (p не мал) на всех")
-    print("сценариях. Межметодный rel показывает, на сколько процентов самый консервативный метод")
+    print("портфеля. Главный тест — whole-model само-калибровка (факт дефолтов против суммы")
+    print("предсказанных PD модели); у корректно построенной модели он проходит (p не мал).")
+    print("По-грейдовый p-value — вторичная диагностика против фиксированной мастер-шкалы, уже")
+    print("с поправкой Холма на 13 грейдов, поэтому сравнивается с обычными 0.05. Он строже по")
+    print("построению: грейд задан ПРЕДСКАЗАННЫМ PD, поэтому внутри бакета смешаны заемщики")
+    print("разного истинного риска, и их фактическая дефолтность тянется к среднему портфеля")
+    print("(regression to the mean) — это свойство бакетирования, а не признак плохой калибровки.")
+    print("Межметодный rel показывает, на сколько процентов самый консервативный метод")
     print("дороже самого экономного при том же портфеле.")
 
 

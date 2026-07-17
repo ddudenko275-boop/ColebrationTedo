@@ -324,12 +324,14 @@ class MonotoneSplineCalibrator:
     segments). After the spline shape is fitted, a logit-scale intercept
     shift preserves the fit-sample central tendency exactly.
 
-    n_bins default (75) comes from scripts/spline_parameter_search.py's data
+    n_bins default (50) comes from scripts/spline_parameter_search.py's data
     floor -- the largest bin count that still keeps ~20 expected defaults per
-    bin on this portfolio -- not from a target economic outcome.
+    bin on this portfolio -- not from a target economic outcome. It depends on
+    the portfolio's base rate (~3.5%), so rerun that script if the generator
+    changes: the previous default of 75 was the floor for the old ~4.6% book.
     """
 
-    def __init__(self, n_bins: int = 75):
+    def __init__(self, n_bins: int = 50):
         self.n_bins = n_bins
 
         self._interp: PchipInterpolator | None = None
@@ -451,16 +453,21 @@ class FrenchSplineCalibrator:
     shift is part of the fitted calibrator and preserves the fit-sample
     central tendency exactly.
 
-    n_bins default (75) is the same data-floor pick as MonotoneSplineCalibrator.
-    shrinkage default (0.9) minimizes OOT Brier score on this portfolio in
-    scripts/spline_parameter_search.py -- note the fit is quite flat for
-    shrinkage above ~0.6, so this choice is not highly sensitive.
+    n_bins default (50) is the same data-floor pick as MonotoneSplineCalibrator.
+
+    shrinkage default (0.75) is the argmin of OOT Brier in
+    scripts/spline_parameter_search.py, but treat it as arbitrary rather than
+    optimal: across the whole grid the Brier score spans 9e-6 while its own
+    standard error on this sample is 1.9e-3, i.e. the criterion cannot tell the
+    candidates apart at all (the script now says so out loud). Any value here is
+    statistically equivalent, so do not read the default as a tuned optimum and
+    do not chase it if the data shifts.
     """
 
     def __init__(
         self,
-        n_bins: int = 75,
-        shrinkage: float = 0.9
+        n_bins: int = 50,
+        shrinkage: float = 0.75
     ):
         self.n_bins = n_bins
         self.shrinkage = shrinkage
