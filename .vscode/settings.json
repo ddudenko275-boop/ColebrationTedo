@@ -1,6 +1,9 @@
 {
   "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-  "jupyter.kernels.excludePythonEnvironments": [
-    "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+  "jupyter.kernels.filter": [
+    {
+      "path": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "type": "pythonEnvironment"
+    }
   ]
 }

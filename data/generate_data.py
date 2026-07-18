@@ -182,12 +182,15 @@ RATING_FEATURE_PROFILES = {
 }
 
 
-# Concentration of the Beta distribution that spreads true PD inside a rating.
-# The mean is pinned to the rating's declared representative PD (see
-# _draw_pd_inside_rating), so this only controls the spread around it. Any value
-# above ~5.3 keeps both Beta shape parameters > 1 for every rating, i.e. a
-# single-peaked bell rather than a U- or J-shape.
-RATING_RISK_CONCENTRATION = 8.0
+RATING_RISK_SUBBAND_MIX = {
+    # Three equal true-PD subbands inside each source rating.  The weights are
+    # shaped as a smooth bell over the detailed A1..D3 structure while keeping
+    # the requested coarse mix A=30%, B=35%, C=20%, D=10%, E=5%.
+    "A": (0.20, 0.35, 0.45),
+    "B": (0.40, 0.35, 0.25),
+    "C": (0.40, 0.35, 0.25),
+    "D": (0.45, 0.35, 0.20),
+}
 
 
 def _logit(values: np.ndarray) -> np.ndarray:
@@ -203,41 +206,19 @@ def _draw_pd_inside_rating(
     size: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     config = get_rating_portfolio_config(portfolio)
-    lower, upper, representative = (config.rating_pd_bounds or {})[rating]
+    lower, upper, _ = (config.rating_pd_bounds or {})[rating]
 
-    # true_pd is a linear map of risk_intensity onto [lower, upper], so pinning
-    # the mean intensity to this target makes the rating's average true PD equal
-    # its declared representative PD. Without this the declaration is dead: a
-    # Beta shape chosen for its looks decides the mean instead, and nothing
-    # checks it against the bounds' third element.
-    #
-    # This matters most for E. Each rating spans a group of master-scale grades
-    # (B = B1..B3, C = C1..C3, D = D1..D3, E = E), and for E -- and only for E --
-    # the declared representative PD is exactly the master scale's expected PD
-    # for that bucket (0.40). E is 5% of the book but ~58% of its total PD, so
-    # letting it drift (it used to realise 0.56) both inflates the portfolio and
-    # puts it at odds with the scale that prices its capital. For A..D the third
-    # element is the generator's own declaration -- it equals neither the band
-    # midpoint nor the mean of the rating's master grades.
-    target_intensity = (representative - lower) / (upper - lower)
-    concentration = RATING_RISK_CONCENTRATION
-    risk_intensity = rng.beta(
-        target_intensity * concentration,
-        (1.0 - target_intensity) * concentration,
-        size,
-    )
+    if rating in RATING_RISK_SUBBAND_MIX:
+        subband_weights = np.asarray(RATING_RISK_SUBBAND_MIX[rating], dtype=float)
+        subband_weights = subband_weights / subband_weights.sum()
+        subband = rng.choice(len(subband_weights), size=size, p=subband_weights)
+        within_subband = rng.beta(2.5, 2.5, size)
+        risk_intensity = (subband + within_subband) / len(subband_weights)
+    elif rating == "E":
+        risk_intensity = rng.beta(2.0, 3.0, size)
+    else:
+        risk_intensity = rng.random(size)
 
-    # The year lifts shift the LOGIT OF THE INTENSITY, not the logit of PD, and
-    # true_pd is only a linear map of that intensity onto the narrow [lower,
-    # upper] band. So their effect on realised PD is far smaller than the
-    # nominal value suggests: oot_pd_lift=0.08 moves the portfolio's mean true
-    # PD by roughly +1.6%, not +8%. Mean true PD by year is therefore nearly
-    # flat (2020: 0.0358, 2023: 0.0336, 2024: 0.0351). This is deliberate and
-    # documented rather than "fixed": the OOT year is meant to test whether a
-    # calibration transfers to an unseen sample, and a genuine stress lift would
-    # instead guarantee failure, since a model fitted on in-time cannot know
-    # about a shock that only hits the OOT year. Do not read these lifts as a
-    # stress scenario.
     year_shift = np.zeros(size)
     year_shift[year_values == config.years[0]] += config.pandemic_pd_lift
     year_shift[year_values == config.years[-1]] += config.oot_pd_lift
@@ -265,15 +246,6 @@ def generate_credit_data(
         and bell-shaped detailed PD bands.
         ``"normal"`` creates a lower-risk portfolio closer to a typical performing
         retail/SME book.
-
-    Each rating's mean ``true_pd`` equals the representative PD declared in its
-    ``rating_pd_bounds`` entry, so the portfolio delivers what it declares. For
-    grade E that declaration is also the master scale's expected PD, which is
-    what keeps the book and the scale that prices it in agreement. The mean PD
-    of the whole portfolio therefore follows from the config alone -- it is
-    ``sum(mix[r] * representative[r])``, about 3.45% for the stress mix. See
-    :func:`_draw_pd_inside_rating` for how this is pinned, and for why the year
-    lifts are not a stress scenario.
     """
 
     config = get_rating_portfolio_config(portfolio)

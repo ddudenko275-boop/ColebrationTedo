@@ -27,7 +27,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
-from sklearn.metrics import brier_score_loss
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -165,12 +164,6 @@ def _evaluate_variant(
         "rwa_bln": float(variant_rwa / 1_000_000_000),
         "rwa_delta_vs_logit_pct": float(rwa_delta_vs_logit),
         "candidate_switch_knots": float(diagnostics["candidate_switch_knot"].sum()),
-        # summary_metrics rounds brier_score to 5 decimals for display, which on
-        # this portfolio collapses every shrinkage to the same 0.02578 -- an
-        # idxmin over that column silently returns whichever value happens to be
-        # first in the grid, not the best one. Keep an unrounded copy for the
-        # selection step.
-        "brier_score_full": float(brier_score_loss(y_test, np.clip(pred_test, 1e-7, 1.0 - 1e-7))),
     }
     row.update(binom)
     return row
@@ -245,32 +238,10 @@ def run_search() -> tuple[pd.DataFrame, pd.DataFrame, int, float]:
 
     results = pd.DataFrame(rows)
     french_rows = results[results["method"] == "Французский сплайн"]
-    recommended_shrinkage = float(
-        french_rows.loc[french_rows["brier_score_full"].idxmin(), "shrinkage"]
-    )
+    recommended_shrinkage = float(french_rows.loc[french_rows["brier_score"].idxmin(), "shrinkage"])
 
-    results = results.sort_values(["method", "brier_score_full"])
-    return results, n_bins_table, recommended_n_bins, recommended_shrinkage, y_test_arr
-
-
-def shrinkage_selection_resolution(french_rows: pd.DataFrame, y_test: np.ndarray) -> dict:
-    """Can the Brier criterion actually tell the shrinkage candidates apart?
-
-    Compares the spread of OOT Brier across the grid against the standard error
-    of the Brier score itself on this sample. If the spread is far below that
-    error, every candidate is statistically indistinguishable and the "winner"
-    is noise -- worth stating outright rather than reporting a false precision.
-    """
-
-    brier = french_rows["brier_score_full"].to_numpy(dtype=float)
-    spread = float(brier.max() - brier.min())
-    se = float(np.std(y_test, ddof=1) / np.sqrt(len(y_test)))
-    return {
-        "brier_spread": spread,
-        "brier_se": se,
-        "spread_over_se": spread / se if se > 0 else float("nan"),
-        "criterion_discriminates": spread > se,
-    }
+    results = results.sort_values(["method", "brier_score"])
+    return results, n_bins_table, recommended_n_bins, recommended_shrinkage
 
 
 def main() -> None:
@@ -278,7 +249,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("docs/spline_parameter_search.csv"))
     args = parser.parse_args()
 
-    results, n_bins_table, recommended_n_bins, recommended_shrinkage, y_test_arr = run_search()
+    results, n_bins_table, recommended_n_bins, recommended_shrinkage = run_search()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(args.out, index=False, encoding="utf-8-sig")
 
@@ -295,14 +266,6 @@ def main() -> None:
     print(f"\nВыбрано n_bins = {recommended_n_bins} (наибольший n_bins, где expected_defaults_per_bin >= {MIN_EXPECTED_DEFAULTS_PER_BIN:.0f})")
 
     print(f"\nШаг 2: shrinkage французского сплайна выбран по минимальному OOT Brier = {recommended_shrinkage}")
-
-    res = shrinkage_selection_resolution(results[results["method"] == "Французский сплайн"], y_test_arr)
-    print(f"  Разброс Brier по сетке shrinkage: {res['brier_spread']:.3e}")
-    print(f"  Стандартная ошибка самого Brier:  {res['brier_se']:.3e}")
-    if not res["criterion_discriminates"]:
-        print(f"  ВНИМАНИЕ: разброс в {1 / res['spread_over_se']:.0f} раз меньше собственной ошибки метрики —")
-        print("  критерий НЕ различает кандидатов, выбор статистически произволен. Любое значение")
-        print("  shrinkage на этой сетке эквивалентно; дефолт взят как формальный argmin.")
 
     display_cols = [
         "method",

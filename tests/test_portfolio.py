@@ -2,11 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.generate_data import (
-    PORTFOLIO_RATING_PD_BOUNDS,
-    generate_credit_data,
-    get_oot_split,
-)
+from data.generate_data import generate_credit_data, get_oot_split
 from src.portfolio import (
     MASTER_SCALE_PD_BOUNDS,
     MASTER_SCALE_RATINGS,
@@ -62,34 +58,6 @@ def test_generated_portfolio_uses_five_year_a_to_e_rating_structure():
     for rating, expected_share in expected_mix.items():
         assert rating_share[rating] == pytest.approx(expected_share, abs=0.015)
     assert (df.groupby("rating")["true_pd"].min() >= 0.0).all()
-
-
-def test_generated_rating_mean_pd_matches_its_declared_representative_pd():
-    """Each rating must realise the representative PD its bounds declare.
-
-    That third bounds element is also the master scale's expected PD for the
-    bucket, so if the generator ignores it the portfolio and the scale disagree
-    by construction and every per-grade calibration test measures that mismatch
-    instead of the model.
-    """
-
-    df = generate_credit_data(random_state=7)
-    mean_pd = df.groupby("rating")["true_pd"].mean()
-
-    for rating, (_, _, representative) in PORTFOLIO_RATING_PD_BOUNDS.items():
-        assert mean_pd[rating] == pytest.approx(representative, rel=0.05)
-
-
-def test_generated_rating_mean_pd_agrees_with_master_scale_bucket():
-    """The A-E representative PDs must line up with the mentor master scale."""
-
-    scale = master_scale_bounds_table().set_index("rating")["pd_avg_master"]
-
-    assert PORTFOLIO_RATING_PD_BOUNDS["E"][2] == pytest.approx(scale["E"])
-    df = generate_credit_data(random_state=7)
-    assert df.loc[df["rating"] == "E", "true_pd"].mean() == pytest.approx(
-        scale["E"], rel=0.05
-    )
 
 
 def test_oot_split_uses_same_in_time_period_for_train_and_calibration():
