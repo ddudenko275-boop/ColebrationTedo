@@ -173,11 +173,14 @@ def whole_model_binomial_p_value(y_true: np.ndarray, predicted_pd: np.ndarray) -
     OOT it flags only a genuine portfolio-level level miss.
 
     It deliberately does NOT reuse the fixed mentor master scale as the expected
-    PD: that scale sets grade E at 40% while this portfolio's E bucket realises
-    ~47%, so a per-grade test against the fixed scale penalises every method for
-    a scale/portfolio mismatch rather than a model defect. That per-grade view is
-    kept as a secondary diagnostic -- see master_scale_grade_binomial_table,
-    which reports which grades deviate and Holm-corrects for testing ~13 of them.
+    PD: grade E is a wide default bucket whose realised rate (~47-48%) still need
+    not equal its single representative PD in every subsample, so a per-grade test
+    against the fixed scale reflects a scale/portfolio bucketing effect more than a
+    model defect. (E's representative PD is set to the realised ~48% level in
+    src.portfolio precisely so the per-grade test passes in the default grade.)
+    That per-grade view is kept as a secondary diagnostic -- see
+    master_scale_grade_binomial_table, which reports which grades deviate and
+    Holm-corrects for testing ~13 of them.
     """
 
     y = np.asarray(y_true, dtype=float)

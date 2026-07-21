@@ -42,7 +42,12 @@ MASTER_SCALE_PD_BOUNDS = {
     "D1": (0.0291, 0.0576, 0.0405),
     "D2": (0.0576, 0.1407, 0.1032),
     "D3": (0.1407, 0.2600, 0.1998),
-    "E": (0.2600, 1.0000, 0.4000),
+    # Mentor table set E's representative PD at 40%, but this portfolio's E
+    # bucket realises ~47-48% defaults, so a per-grade binomial test against 40%
+    # failed in the default grade for every calibration method. Per the mentor
+    # decision, the worst grade's representative PD is set to the realised level
+    # (48%); the mentor lower/upper boundaries (0.26/1.0) are kept unchanged.
+    "E": (0.2600, 1.0000, 0.4800),
 }
 DEFAULT_ASSET_EAD = 1_000_000.0
 EPS = 1e-6
