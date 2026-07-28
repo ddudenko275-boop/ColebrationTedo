@@ -6,17 +6,16 @@
 
 - `notebooks/pd_calibration.ipynb` - основной исследовательский notebook.
 - `notebooks/monte_carlo.ipynb` - Monte Carlo проверка устойчивости калибровок к составу портфеля: whole-model тест калибровки (само-калибровка) / PD / EL / UL / EL+UL / RWA по сценариям, сводка mean/min/max/range, межметодный разброс EL+UL внутри сценария и диагностика по грейдам мастер-шкалы.
-- `notebooks/monte_carlo.py` - вычислительный движок Monte Carlo (ресемплинг ~80% без переобучения модели), используется ноутбуком выше.
+- `src/monte_carlo.py` - вычислительный движок Monte Carlo (ресемплинг ~80% без переобучения модели), используется ноутбуком выше.
 - `src/calibrators.py` - методы калибровки PD: logit/Platt, isotonic, beta, spline.
 - `src/metrics.py` - метрики калибровки, дискриминации и стабильности.
 - `src/capital.py` - Basel-style расчет expected loss, unexpected-loss capital и RWA.
 - `data/generate_data.py` - генерация синтетического кредитного портфеля.
 - `scripts/spline_parameter_search.py` - data-driven подбор параметров сплайн-калибраторов.
-- `docs/monte_carlo_scenarios.csv` - полная выгрузка всех 1000 Monte Carlo сценариев (5000 строк) для отдельного просмотра.
-- `docs/monte_carlo_cross_method_spread.csv` - межметодный разброс EL + UL внутри каждого сценария (1000 строк): самый дешёвый / дорогой метод, abs и rel разница.
 - `docs/references.md` - статьи и регуляторные источники, на которые опирается проект.
-- `docs/spline_methodology.md` - разбор методологии сплайн-калибраторов и обоснование переработки 2026-07.
-- `docs/calibration_change_report.md` - журнал методологических изменений калибровки.
+- `docs/spline_methodology.md` - разбор методологии сплайн-калибраторов.
+
+Выгрузки Monte Carlo (`docs/*.csv`) генерируются из ноутбуков и не хранятся в репозитории.
 
 ## Основная идея
 

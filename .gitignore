@@ -6,3 +6,8 @@ __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
 .env
+
+# Генерируемые выгрузки Monte Carlo / подбора параметров (воспроизводятся из ноутбуков)
+docs/monte_carlo_scenarios.csv
+docs/monte_carlo_cross_method_spread.csv
+docs/spline_parameter_search.csv
