@@ -7,6 +7,9 @@ __pycache__/
 pytest-cache-files-*/
 .env
 
+# Черновики статей (не публикуются в репозитории)
+articles/
+
 # Генерируемые выгрузки Monte Carlo / подбора параметров (воспроизводятся из ноутбуков)
 docs/monte_carlo_scenarios.csv
 docs/monte_carlo_cross_method_spread.csv

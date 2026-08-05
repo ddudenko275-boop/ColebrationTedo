@@ -7,7 +7,16 @@ scoring. Each Monte Carlo scenario independently resamples a fraction of the
 in-time and OOT populations without replacement and scores them through the
 fixed pipeline:
 
-    score -> calibrated PD -> EL / UL / Capital / RWA
+    score -> calibrated PD -> master-scale grade -> EL / UL / Capital / RWA
+
+Capital (EL / UL / EL+UL / RWA) is deliberately computed on the master-scale
+representative PD of each borrower's fixed A1...E grade -- the regulatory-style
+pooled PD assigned to the grade -- rather than on the raw per-borrower
+calibrated PD. This matches section 8 of the calibration notebook, where capital
+is built on pd_avg_master via rating_scale_capital_by_rating, and mirrors how a
+bank capitalises on the grade's assigned PD rather than the model's raw output.
+The calibrated PD itself is still used for the whole-model binomial
+self-calibration test and the mean-PD calibration diagnostic.
 
 This isolates sensitivity to portfolio composition from sensitivity to model
 fitting. See docs/calibration_change_report.md for the underlying calibrator
@@ -200,15 +209,19 @@ def prepare_fixed_pipeline(
 ) -> dict:
     """Fit the OOF boosting score pipeline and all calibrators once.
 
-    Precompute per-row PD and capital. Calibration-period scores are
-    out-of-fold, while OOT scores come from the final model fitted on the full
-    in-time period. Because the score pipeline and every calibrator are fixed
-    for the Monte Carlo run, a row's calibrated PD -- and its additive IRB capital
-    contribution -- is identical in every scenario. So they are computed once
-    here on the full in-time and OOT samples; a scenario then only indexes the
-    rows its random ~80% subsample selected. Nothing is refit or re-scored
-    inside a scenario. The scenario subsamples are still drawn independently
-    per seed, so each scenario sees a different 80% of the same base.
+    Precompute per-row PD, master-scale grade and capital. Calibration-period
+    scores are out-of-fold, while OOT scores come from the final model fitted on
+    the full in-time period. Because the score pipeline and every calibrator are
+    fixed for the Monte Carlo run, a row's calibrated PD, its fixed A1...E grade
+    and the master-scale IRB capital contribution of that grade are identical in
+    every scenario. So they are computed once here on the full in-time and OOT
+    samples; a scenario then only indexes the rows its random ~80% subsample
+    selected. Nothing is refit or re-scored inside a scenario. The scenario
+    subsamples are still drawn independently per seed, so each scenario sees a
+    different 80% of the same base.
+
+    Capital is on the master-scale representative PD of the grade (see the module
+    docstring), so it is additive over the portfolio exactly like a raw-PD figure.
     """
 
     assumptions = capital_assumptions or DEFAULT_CAPITAL_ASSUMPTIONS
@@ -237,9 +250,18 @@ def prepare_fixed_pipeline(
         pred_calib_full[method] = pred_calib
         pred_test_full[method] = pred_test
         grade_calib_full[method] = _master_scale_grade_codes(pred_calib)
-        grade_test_full[method] = _master_scale_grade_codes(pred_test)
+        grade_test = _master_scale_grade_codes(pred_test)
+        grade_test_full[method] = grade_test
 
-        row_capital = calculate_irb_capital(pred_test, assumptions=assumptions)
+        # Capital is computed on the master-scale representative PD of each
+        # borrower's fixed A1...E grade -- the regulatory-style pooled PD -- not
+        # on the raw per-borrower calibrated PD. This reproduces section 8 of the
+        # calibration notebook (rating_scale_capital_by_rating on pd_avg_master)
+        # and the industry practice of capitalising on the grade's assigned PD.
+        # Grade assignment depends only on the fixed mentor bounds, so this stays
+        # a per-row, additive figure that is precomputed once here.
+        master_pd_test = representative_pd[grade_test]
+        row_capital = calculate_irb_capital(master_pd_test, assumptions=assumptions)
         rows = {
             metric: row_capital[col].to_numpy(dtype=float)
             for metric, col in _CAPITAL_ROW_COLUMNS.items()
